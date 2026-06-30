@@ -1,0 +1,47 @@
+# Python
+__pycache__/
+*.py[oc]
+*.egg-info/
+build/
+dist/
+
+# Virtualenv
+.venv/
+venv/
+
+# Secrets
+.env
+*.pem
+*.key
+
+# IDE
+.idea/
+.vscode/
+
+# OS
+.DS_Store
+
+# Data — raw datasets too large for git, also licensing concerns
+data/raw/*.csv
+data/raw/*.tsv
+data/synthetic/*.csv
+data/processed/*.csv
+!data/raw/.gitkeep
+!data/synthetic/.gitkeep
+!data/processed/.gitkeep
+
+# ML artifacts
+mlruns/
+mlartifacts/
+*.pkl
+*.joblib
+*.onnx
+
+# Docker
+postgres_data/
+
+# uv
+uv.lock
+
+# Jupyter
+.ipynb_checkpoints/
