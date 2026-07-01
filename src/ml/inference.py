@@ -23,7 +23,19 @@ from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 
 mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
-_feature_engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+
+
+# Lazy feature engine — created on first DB query. Keeps import cheap so
+# constant-only tests (test_synthetic.TestIndustryConstants) don't need a
+# live database.
+_feature_engine = None
+
+
+def _get_feature_engine():
+    global _feature_engine
+    if _feature_engine is None:
+        _feature_engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+    return _feature_engine
 
 
 # Cohort-aware non-payer gate.
@@ -100,7 +112,7 @@ def _resolve_latest(prefix: str) -> tuple[str, str, str]:
 
 def fetch_user_features(user_id: str) -> pd.DataFrame:
     q = text("SELECT * FROM user_features_d7 WHERE user_id = :uid LIMIT 1")
-    df = pd.read_sql(q, _feature_engine, params={"uid": user_id})
+    df = pd.read_sql(q, _get_feature_engine(), params={"uid": user_id})
     if df.empty:
         raise HTTPException(status_code=404, detail=f"user_id '{user_id}' not in feature table")
     return df
