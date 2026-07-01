@@ -1,0 +1,130 @@
+# ───────────────────────────────────────────────────────────────────────────
+# Player Monetization Intelligence Platform — full stack
+#
+#   docker compose up -d           # start everything
+#   docker compose logs -f api     # tail API logs
+#   docker compose down            # stop and remove containers
+#   docker compose down -v         # ...and wipe named volumes (fresh DB!)
+#
+# Services:
+#   • postgres   — Postgres 16, holds real/synth users + prediction logs
+#   • mlflow     — MLflow 3.14 tracking + model registry (SQLite backend)
+#   • api        — FastAPI service (5 endpoints on :8000)
+#   • dashboard  — Streamlit dashboard on :8501 (consumes the API)
+#
+# Networking: services reach each other via service names on the default
+# bridge network (`postgres`, `mlflow`, `api`). Only ports we expose to the
+# host are the ones a human/dev needs.
+# ───────────────────────────────────────────────────────────────────────────
+
+services:
+
+  # ═════════════════════════════════════════════════════════════════════════
+  postgres:
+    image: postgres:16
+    container_name: monetization_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-train}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB:-monetization_db}
+    ports:
+      - "5434:5432"                          # host:container
+    volumes:
+      - monetization_postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-train} -d ${POSTGRES_DB:-monetization_db}"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  # ═════════════════════════════════════════════════════════════════════════
+  mlflow:
+    image: ghcr.io/mlflow/mlflow:v3.14.0
+    container_name: monetization_mlflow
+    restart: unless-stopped
+    environment:
+      # MLflow 3.x has a Host-header security check that rejects requests with
+      # unknown Host values (DNS-rebinding defence). Inside compose the API
+      # + dashboard reach us as `http://mlflow:5000`, so we must trust that name.
+      # (correct env var confirmed via mlflow.server.security_utils source)
+      MLFLOW_SERVER_ALLOWED_HOSTS: "mlflow,mlflow:*,localhost,localhost:*,127.0.0.1,127.0.0.1:*"
+    ports:
+      - "5001:5000"                          # host:5001 → container:5000
+    volumes:
+      - ./mlruns:/mlruns
+      - ./mlartifacts:/mlartifacts
+    command: >
+      mlflow server
+        --host 0.0.0.0
+        --port 5000
+        --backend-store-uri sqlite:////mlruns/mlflow.db
+        --artifacts-destination /mlartifacts
+        --serve-artifacts
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:5000/').read()"]
+      interval: 10s
+      timeout: 3s
+      retries: 10
+
+  # ═════════════════════════════════════════════════════════════════════════
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: monetization-api:latest
+    container_name: monetization_api
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      mlflow:
+        condition: service_healthy
+    environment:
+      # Compose-network hostnames (postgres, mlflow) instead of localhost.
+      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}@postgres:5432/${POSTGRES_DB:-monetization_db}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      APP_ENV: production
+      LOG_LEVEL: INFO
+    ports:
+      - "8000:8000"
+    volumes:
+      # Model artifacts as a read-only mount so we can retrain on the host
+      # and just restart the API — no rebuild needed.
+      - ./saved_models:/app/saved_models:ro
+
+  # ═════════════════════════════════════════════════════════════════════════
+  dashboard:
+    # Reuse the same image as the API (all deps present, including streamlit)
+    image: monetization-api:latest
+    container_name: monetization_dashboard
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_started
+    environment:
+      # Streamlit reaches FastAPI over the compose network.
+      API_URL: http://api:8000
+      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}@postgres:5432/${POSTGRES_DB:-monetization_db}
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+    ports:
+      - "8501:8501"
+    volumes:
+      # Same read-only saved_models mount so the "Model Registry" page can
+      # show the calibration_curve.png artifact.
+      - ./saved_models:/app/saved_models:ro
+    command: >
+      streamlit run dashboard/Home.py
+        --server.port=8501
+        --server.address=0.0.0.0
+        --server.headless=true
+        --browser.gatherUsageStats=false
+
+# ───────────────────────────────────────────────────────────────────────────
+# Named volumes (Docker-managed, survive `down` — need `down -v` to wipe)
+# ───────────────────────────────────────────────────────────────────────────
+volumes:
+  monetization_postgres_data:
+    external: true       # attach to the volume you already have from earlier work

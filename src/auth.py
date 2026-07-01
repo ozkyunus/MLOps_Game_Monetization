@@ -1,10 +1,10 @@
 import os
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 
 import jwt
 from dotenv import load_dotenv
 from fastapi import HTTPException, Security
-from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from passlib.context import CryptContext
 
 load_dotenv()
@@ -23,8 +23,8 @@ class AuthHandler:
 
     def encode_token(self, user_id) -> str:
         payload = {
-            "exp": datetime.now(timezone.utc) + timedelta(minutes=60),
-            "iat": datetime.now(timezone.utc),
+            "exp": datetime.now(UTC) + timedelta(minutes=60),
+            "iat": datetime.now(UTC),
             "sub": str(user_id),
         }
         return jwt.encode(payload, self.secret, algorithm="HS256")

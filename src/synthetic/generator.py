@@ -19,9 +19,7 @@ Anomaly injection (for drift demo):
 
 Run: uv run python scripts/generate_synthetic_data.py
 """
-import numpy as np
 import pandas as pd
-
 
 # -------------------- Configuration --------------------
 

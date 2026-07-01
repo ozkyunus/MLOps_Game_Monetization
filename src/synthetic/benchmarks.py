@@ -19,8 +19,8 @@ Sources:
   [7] Real reference — Firebase Public Project, Flood It! 30-day sample
 """
 from __future__ import annotations
-from typing import Final
 
+from typing import Final
 
 # ── Project target genre ─────────────────────────────────────────────────────
 # Our project models a "hybrid-casual" mobile game (deeper meta than
@@ -129,18 +129,48 @@ CPI_USD: Final[dict[str, float]] = {
 # ── Channel quality multipliers (engagement_potential modifier) ──────────────
 # Higher = users from this channel are more engaged (industry knowledge).
 # Used in causal generation: behaviors ~ f(latent * channel_multiplier).
+# Calibrated stronger than v1 so channel becomes a meaningful predictor.
 CHANNEL_ENGAGEMENT_MULTIPLIER: Final[dict[str, float]] = {
-    "Organic":      1.30,   # came on their own — most engaged
-    "(direct)":     1.30,   # same as organic
-    "google-play":  1.20,   # browsing app store — high intent
+    "Organic":      1.40,   # came on their own — most engaged
+    "(direct)":     1.40,   # same as organic
+    "google-play":  1.25,   # browsing app store — high intent
     "Facebook Ads": 1.00,   # baseline
-    "Google Ads":   0.95,   # slight intent-based dropoff
-    "TikTok Ads":   0.85,   # impulse traffic, lower engagement
+    "Google Ads":   0.90,   # search intent, mixed quality
+    "TikTok Ads":   0.65,   # impulse traffic, lowest stickiness (industry pattern)
     "firebase":     1.00,   # debug/test
     "(none)":       1.00,
     "google":       1.00,
-    "invite_a_friend": 1.40, # viral users — highest engagement
+    "invite_a_friend": 1.50, # viral users — highest engagement
 }
+
+
+# ── Channel LTV multipliers (revenue-quality modifier) ───────────────────────
+# Independent of engagement: even if two channels produce equally engaged
+# users, their spending propensity differs. TikTok impulses → smaller IAPs;
+# Organic users → higher LTV due to intrinsic motivation.
+# Industry source: Adjust / Liftoff 2024 channel-quality reports.
+CHANNEL_LTV_MULTIPLIER: Final[dict[str, float]] = {
+    "Organic":      1.00,   # baseline (highest-quality acquisition)
+    "(direct)":     1.00,
+    "google-play":  0.95,
+    "Facebook Ads": 0.85,   # broad targeting → mixed payers
+    "Google Ads":   0.90,   # search intent often non-monetization
+    "TikTok Ads":   0.60,   # impulse traffic → low LTV (industry typical)
+    "firebase":     1.00,
+    "(none)":       1.00,
+    "google":       1.00,
+    "invite_a_friend": 1.15, # viral users → above-baseline LTV
+}
+
+
+# ── Whale cohort design ──────────────────────────────────────────────────────
+# Larger sample size so stratified test set has ≥75 whale rows (statistically
+# defensible). We also inject some non-payers (~15%) so the cohort is not a
+# trivial "all 1s" — which would make F1 metric meaningless.
+WHALE_COHORT_SIZE:           Final[int]   = 500
+WHALE_COHORT_NONPAYER_RATIO: Final[float] = 0.15  # 15% non-payers in whale cohort
+# Note: augmented_whale is TRAIN-ONLY (see train scripts). Evaluating on a
+# cohort that is 85% payers by design would mask real-world performance.
 
 
 # ── Geo distribution targets — for augmentation balance ──────────────────────

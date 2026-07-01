@@ -41,7 +41,7 @@ mlartifacts/
 postgres_data/
 
 # uv
-uv.lock
+# uv.lock is committed — Docker builds and CI need it for reproducible `uv sync --frozen`
 
 # Jupyter
 .ipynb_checkpoints/

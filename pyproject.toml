@@ -16,13 +16,62 @@ dependencies = [
     "numpy>=2.5.0",
     "pandas>=2.2,<3",
     "passlib[bcrypt]>=1.7.4",
+    "plotly>=6.8.0",
     "protobuf>=4.25,<5",
     "psycopg2-binary>=2.9.12",
     "pyjwt>=2.13.0",
     "python-dotenv>=1.2.2",
+    "requests>=2.34.2",
     "scikit-learn>=1.9.0",
     "sdv>=1.37.2",
     "sqlmodel>=0.0.39",
+    "streamlit>=1.58.0",
     "uvicorn[standard]>=0.49.0",
     "xgboost>=3.3.0",
 ]
+
+[dependency-groups]
+dev = [
+    "ruff>=0.14",
+    "pytest>=8.4",
+    "pytest-cov>=6.0",
+    "httpx>=0.27",
+]
+
+[tool.ruff]
+line-length = 110
+target-version = "py312"
+extend-exclude = [
+    "notebooks",
+    "mlruns",
+    "mlartifacts",
+    "data",
+    ".venv",
+]
+
+[tool.ruff.lint]
+# Keep the rule set intentionally light — this repo is a capstone, not a library.
+# We enforce pyflakes (F) errors + a few obvious style rules, but stay away from
+# pedantic complaints that would just add churn on synthesized/generated code.
+select = [
+    "E",    # pycodestyle errors
+    "F",    # pyflakes
+    "W",    # pycodestyle warnings
+    "I",    # isort import order
+    "B",    # flake8-bugbear (real bugs, not style)
+    "UP",   # pyupgrade
+]
+ignore = [
+    "E501",  # line too long — handled by formatter separately when we care
+    "B008",  # function calls in argument defaults — FastAPI `Depends` is fine
+    "E402",  # module import not at top — Streamlit pages need `st.set_page_config` first
+    "E701",  # multiple statements on one line (colon) — `if x: return y` style is fine
+    "E702",  # multiple statements on one line (semicolon)
+    "B023",  # closure over loop variable — our `map(lambda v: ...)` calls are synchronous
+    "B904",  # `raise ... from err` — noisy for demo scripts
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra -q --strict-markers"
+

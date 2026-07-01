@@ -3,28 +3,42 @@ Build the ML-ready feature table: user_features_d7.
 
 Combines real backbone + synthetic augmentation into one row-per-user table.
 
+Honesty fixes vs v1 (see README → Limitations section for full discussion):
+  - Real users: engagement_potential is now sampled INDEPENDENTLY from the
+    industry distribution, NOT derived from LTV. This eliminates the
+    target leakage that was inflating model AUC.
+    Consequence: real users become harder to predict (which is the honest
+    state of affairs given we have no behavioral event data for them).
+  - target_ltv_d30 → target_ltv (the underlying real data is a D7 snapshot,
+    not a true D30 measurement; the v1 name was misleading).
+  - Channel-LTV multiplier flows through to real users too (so the model
+    sees channel-driven LTV variance).
+
 Steps:
   1. Load real users + real purchases from Postgres.
-  2. Derive D7 behavior for real users (forward-causal from LTV + noise).
-     This is the same forward model used for synthetic users, so the
-     combined dataset is internally consistent.
+  2. Generate independent random behavior for real users (forward-causal
+     from population engagement distribution).
   3. Load synth users (already have engagement/sessions/etc).
   4. Concatenate, engineer derived features, attach LTV target.
   5. Write to Postgres as `user_features_d7`.
 
-Output: ~17,605 rows × ~25 columns
+Output: ~17,955 rows × ~20 columns (with whale 500 instead of 150).
 """
 from __future__ import annotations
 
 import os
+
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
 from sqlalchemy import create_engine
 
 from src.synthetic import benchmarks as B
-from src.synthetic.user_augmentation import derive_sessions_d7, derive_ad_views_d7
-
+from src.synthetic.user_augmentation import (
+    derive_ad_views_d7,
+    derive_sessions_d7,
+    sample_engagement_potential,
+)
 
 load_dotenv()
 engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
@@ -34,11 +48,16 @@ np.random.seed(SEED)
 
 
 def derive_behavior_for_real_users(real_users: pd.DataFrame, real_purchases: pd.DataFrame) -> pd.DataFrame:
-    """For real users, derive D7 behavior features consistent with their LTV.
+    """For real users, derive D7 behavior features INDEPENDENTLY of LTV.
 
-    Forward-causal-ish (with noise for non-leakage):
-      LTV → engagement_potential (inverse map + noise) → behaviors
-    The noise ensures models still have to LEARN, not just decode.
+    This is the honest replacement for v1's leaky `engagement = log1p(LTV) + noise`.
+    Now engagement is sampled from the same population distribution used for
+    synth users, multiplied only by the channel quality factor.
+
+    Consequence: model cannot predict real-user LTV from behavior (because
+    behavior is uninformative). It can still use demographics (channel,
+    country, platform). This is what real production data looks like for
+    a brand-new user with no behavioral history.
     """
     user_ltv = (
         real_purchases.groupby("user_id")["ltv"]
@@ -49,13 +68,12 @@ def derive_behavior_for_real_users(real_users: pd.DataFrame, real_purchases: pd.
     df = real_users.merge(user_ltv, on="user_id", how="left")
     df["_real_ltv"] = df["_real_ltv"].fillna(0.0)
 
-    # Inverse map LTV → engagement (with structural noise)
-    # log1p flattens whales so they don't completely dominate
-    base = np.log1p(df["_real_ltv"].values)
-    noise = np.random.normal(0, 0.7, size=len(df))
-    df["_engagement_potential"] = np.maximum(0.1, base + noise + 0.8)
+    # INDEPENDENT engagement — sampled from population distribution +
+    # channel quality multiplier. No LTV dependence.
+    chan_mult = df["type"].map(B.CHANNEL_ENGAGEMENT_MULTIPLIER).fillna(1.0).values
+    df["_engagement_potential"] = sample_engagement_potential(len(df), chan_mult)
 
-    # Forward-causal behaviors
+    # Forward-causal behaviors from independent engagement
     df["_sessions_d7"] = derive_sessions_d7(df["_engagement_potential"].values)
     df["_ad_views_d7"] = derive_ad_views_d7(df["_sessions_d7"].values)
 
@@ -71,8 +89,13 @@ def derive_behavior_for_real_users(real_users: pd.DataFrame, real_purchases: pd.
 
 
 def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
-    """Ensure real + synth have same column names + types."""
-    # Channel name harmonization
+    """Ensure real + synth have same string representation.
+
+    Critical fix: country was 'US' in real backbone and 'United States' in
+    synth — the model was learning this string difference as a cohort
+    indicator (v1 country importance was 0.39, mostly cohort signal). We
+    normalize so the model has to rely on actual demographic signal.
+    """
     channel_norm = {
         "organic": "Organic",
         "(direct)": "Organic",
@@ -81,6 +104,17 @@ def normalize_columns(df: pd.DataFrame) -> pd.DataFrame:
         "google": "Google Ads",
     }
     df["channel"] = df["type"].map(channel_norm).fillna(df["type"])
+
+    country_norm = {
+        "US":      "United States",
+        "USA":     "United States",
+        "U.S.":    "United States",
+        "U.S.A.":  "United States",
+        "UK":      "United Kingdom",
+        "GB":      "United Kingdom",
+        "Korea":   "South Korea",
+    }
+    df["country"] = df["country"].replace(country_norm)
     return df
 
 
@@ -92,8 +126,8 @@ def build_features() -> pd.DataFrame:
     synth_purchases = pd.read_sql("SELECT * FROM synth_purchases",  engine)
     print(f"  Real users: {len(real_users):,} | Synth users: {len(synth_users):,}")
 
-    # ── Derive behavior for real users ───────────────────────────────────────
-    print("\nDeriving D7 behavior for real users (forward-causal)...")
+    # ── Derive INDEPENDENT behavior for real users ───────────────────────────
+    print("\nGenerating independent behavior for real users (no LTV leakage)...")
     real_enriched = derive_behavior_for_real_users(real_users, real_purchases)
 
     # ── Compute LTV target for synth users ───────────────────────────────────
@@ -128,31 +162,30 @@ def build_features() -> pd.DataFrame:
     combined["install_month"]   = combined["install_date"].dt.month
     combined["install_is_weekend"] = (combined["install_dow"] >= 5).astype(int)
 
-    # Behavior ratios (NaN-safe)
     combined["ads_per_session"]   = combined["_ad_views_d7"] / combined["_sessions_d7"].replace(0, 1)
     combined["sessions_per_day"]  = combined["_sessions_d7"] / 7.0
 
-    # Engagement bucket (low / mid / high)
     combined["engagement_bucket"] = pd.qcut(
         combined["_engagement_potential"],
         q=[0, 0.25, 0.75, 1.0],
         labels=["low", "mid", "high"],
     )
 
-    # Channel x platform interaction
     combined["channel_platform"] = combined["channel"] + "_" + combined["platform"].fillna("unknown")
 
     # ── Targets ──────────────────────────────────────────────────────────────
-    combined["target_ltv_d30"]     = combined["_real_ltv"]
-    combined["target_is_payer"]    = combined["_will_purchase"]
+    # target_ltv: observed lifetime value at observation window. Real users:
+    # D7 snapshot from raw data. Synth users: D30 cumulative by construction.
+    # Mixed semantics — see README for the disclaimer downstream consumers see.
+    combined["target_ltv"]       = combined["_real_ltv"]
+    combined["target_is_payer"]  = combined["_will_purchase"]
 
-    # ── Final column order ───────────────────────────────────────────────────
     feature_cols = [
         "user_id",
         # Demographics / acquisition
         "country", "platform", "channel", "type",
         "install_date", "install_dow", "install_month", "install_is_weekend",
-        # Behavior (D7)
+        # Behavior (D7 snapshot — for synth, causally generated; for real, independent)
         "_engagement_potential", "_sessions_d7", "_ad_views_d7",
         "ads_per_session", "sessions_per_day", "engagement_bucket",
         # Interaction
@@ -160,7 +193,7 @@ def build_features() -> pd.DataFrame:
         # Cohort labels (for filtering / analysis, not training)
         "_segment", "_cohort",
         # Targets
-        "target_ltv_d30", "target_is_payer",
+        "target_ltv", "target_is_payer",
     ]
     combined = combined[feature_cols]
 
@@ -172,13 +205,22 @@ def main():
 
     print("\n── Feature table summary ──────────────────────────────")
     print(f"Shape: {df.shape}")
-    print(f"\nCohort distribution:")
+    print("\nCohort distribution:")
     print(df["_cohort"].value_counts())
-    print(f"\nSegment distribution:")
+    print("\nSegment distribution:")
     print(df["_segment"].value_counts())
     print(f"\nPayer rate: {df['target_is_payer'].mean()*100:.2f}%")
-    print(f"LTV stats (payers only):")
-    print(df.loc[df['target_is_payer']==1, "target_ltv_d30"].describe().round(2))
+    print("LTV stats (payers only):")
+    print(df.loc[df['target_is_payer']==1, "target_ltv"].describe().round(2))
+
+    print("\n── Channel-LTV signal (was missing in v1) ──")
+    print(
+        df[df["target_is_payer"] == 1]
+        .groupby("channel")["target_ltv"]
+        .agg(["count", "mean", "median"])
+        .round(2)
+        .sort_values("mean", ascending=False)
+    )
 
     print("\nWriting to Postgres → user_features_d7 ...")
     df.to_sql("user_features_d7", engine, if_exists="replace", index=False)

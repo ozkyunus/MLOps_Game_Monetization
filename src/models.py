@@ -10,17 +10,16 @@ Tables:
 - AgentAction    : decision engine actions taken (for replay / A/B analysis)
 """
 
-from datetime import datetime, timezone
-from typing import Optional, Literal
-from sqlmodel import SQLModel, Field, text
+from datetime import UTC, datetime
 
+from sqlmodel import Field, SQLModel, text
 
 # -------------------- Auth --------------------
 
 class User(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     username: str = Field(index=True, unique=True)
-    email: Optional[str] = None
+    email: str | None = None
     password_hash: str
     role: str = Field(default="analyst")  # admin / analyst
 
@@ -28,7 +27,7 @@ class User(SQLModel, table=True):
 class CreateUser(SQLModel):
     username: str
     password: str
-    email: Optional[str] = None
+    email: str | None = None
 
 
 class Login(SQLModel):
@@ -39,7 +38,7 @@ class Login(SQLModel):
 class ShowUser(SQLModel):
     id: int
     username: str
-    email: Optional[str] = None
+    email: str | None = None
     role: str
 
 
@@ -47,55 +46,55 @@ class ShowUser(SQLModel):
 
 class Player(SQLModel, table=True):
     player_id: str = Field(primary_key=True)  # supports UUIDs from IAP dataset
-    age: Optional[float] = None
-    gender: Optional[str] = None
-    country: Optional[str] = None
-    device: Optional[str] = None
-    game_genre: Optional[str] = None
+    age: float | None = None
+    gender: str | None = None
+    country: str | None = None
+    device: str | None = None
+    game_genre: str | None = None
     # Activity
-    sessions_per_week: Optional[float] = None
-    avg_session_duration: Optional[float] = None
-    play_time_hours: Optional[float] = None
-    player_level: Optional[int] = None
-    achievements_unlocked: Optional[int] = None
+    sessions_per_week: float | None = None
+    avg_session_duration: float | None = None
+    play_time_hours: float | None = None
+    player_level: int | None = None
+    achievements_unlocked: int | None = None
     # Monetization
-    in_app_purchases: Optional[bool] = None
-    in_app_purchase_amount: Optional[float] = None  # USD
-    first_purchase_days_after_install: Optional[float] = None
-    payment_method: Optional[str] = None
-    last_purchase_date: Optional[datetime] = None
-    spending_segment: Optional[str] = None  # Minnow/Dolphin/Whale
+    in_app_purchases: bool | None = None
+    in_app_purchase_amount: float | None = None  # USD
+    first_purchase_days_after_install: float | None = None
+    payment_method: str | None = None
+    last_purchase_date: datetime | None = None
+    spending_segment: str | None = None  # Minnow/Dolphin/Whale
     # Engagement / churn
-    engagement_level: Optional[str] = None  # Low/Medium/High
-    retention_1: Optional[bool] = None
-    retention_7: Optional[bool] = None
+    engagement_level: str | None = None  # Low/Medium/High
+    retention_1: bool | None = None
+    retention_7: bool | None = None
     # Synthetic ad data (populated by data_simulator)
-    ad_views_total: Optional[int] = None
-    ad_views_last_7d: Optional[int] = None
-    ad_tolerance_score: Optional[float] = None
+    ad_views_total: int | None = None
+    ad_views_last_7d: int | None = None
+    ad_tolerance_score: float | None = None
     # Bookkeeping
-    created_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
     )
-    updated_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    updated_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
     )
 
 
 # -------------------- Predictions --------------------
 
 class PredictionLog(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     player_id: str = Field(index=True)
     service: str = Field(index=True)  # propensity / ltv / decision / ad_fatigue / segmentation
     model_version: str
-    prediction_value: Optional[float] = None  # numeric output (score, amount)
-    prediction_label: Optional[str] = None    # categorical output (segment, action)
-    confidence: Optional[float] = None
-    features_snapshot: Optional[str] = None   # JSON string for audit
-    created_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    prediction_value: float | None = None  # numeric output (score, amount)
+    prediction_label: str | None = None    # categorical output (segment, action)
+    confidence: float | None = None
+    features_snapshot: str | None = None   # JSON string for audit
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
     )
 
@@ -107,7 +106,7 @@ class PropensityRequest(SQLModel):
 class PropensityResponse(SQLModel):
     player_id: str
     purchase_prob_30d: float
-    expected_amount: Optional[float] = None
+    expected_amount: float | None = None
     expected_revenue: float
     segment: str
     model_version: str
@@ -115,13 +114,13 @@ class PropensityResponse(SQLModel):
 
 class DecisionRequest(SQLModel):
     player_id: str
-    context: Optional[str] = None  # "level_complete" / "app_open" / etc.
+    context: str | None = None  # "level_complete" / "app_open" / etc.
 
 
 class DecisionResponse(SQLModel):
     player_id: str
     action: str  # SHOW_IAP / SHOW_AD_REWARDED / SHOW_AD_INTERSTITIAL / SKIP
-    offer: Optional[str] = None
+    offer: str | None = None
     expected_revenue: float
     reasoning: str
     alternatives: list[dict]
@@ -131,15 +130,15 @@ class DecisionResponse(SQLModel):
 # -------------------- Model registry mirror --------------------
 
 class ModelVersion(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     service: str = Field(index=True)
     version: str
     mlflow_run_id: str
     metrics_json: str   # JSON: {"f1": 0.82, "auc": 0.91, ...}
     is_production: bool = Field(default=False, index=True)
-    promoted_at: Optional[datetime] = None
-    created_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    promoted_at: datetime | None = None
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
     )
 
@@ -147,15 +146,15 @@ class ModelVersion(SQLModel, table=True):
 # -------------------- Drift monitoring --------------------
 
 class DriftLog(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     service: str = Field(index=True)
     feature_name: str
     ks_statistic: float
     p_value: float
     drift_detected: bool
     week_number: int
-    created_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
     )
 
@@ -163,15 +162,15 @@ class DriftLog(SQLModel, table=True):
 # -------------------- Agent / decision action audit --------------------
 
 class AgentAction(SQLModel, table=True):
-    id: Optional[int] = Field(default=None, primary_key=True)
+    id: int | None = Field(default=None, primary_key=True)
     player_id: str = Field(index=True)
     action_taken: str
-    offer_shown: Optional[str] = None
-    outcome: Optional[str] = None  # CONVERTED / DISMISSED / NO_RESPONSE
-    revenue_generated: Optional[float] = None
+    offer_shown: str | None = None
+    outcome: str | None = None  # CONVERTED / DISMISSED / NO_RESPONSE
+    revenue_generated: float | None = None
     model_version: str
-    ab_test_group: Optional[str] = None
-    created_at: Optional[datetime] = Field(
-        default_factory=lambda: datetime.now(timezone.utc),
+    ab_test_group: str | None = None
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
         sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
     )

@@ -1,0 +1,67 @@
+# ─────────────────────────────────────────────────────────────────────
+# Files excluded from the Docker build context.
+# Keeps the image lean and prevents secrets/large data from leaking in.
+# ─────────────────────────────────────────────────────────────────────
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Python caches
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Local virtualenv — built fresh inside the container
+.venv/
+venv/
+env/
+
+# Notebooks and their checkpoints (huge, not needed for serving)
+notebooks/
+*.ipynb
+.ipynb_checkpoints/
+
+# Large raw / synthetic data (data lives in Postgres, not on disk)
+data/
+mlruns/
+mlartifacts/
+postgres_data/
+
+# IDE + OS junk
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+
+# Secrets — mounted at runtime, never baked in
+.env
+.env.*
+!.env.example
+
+# Tests + build artifacts (tests run in CI, not in the runtime image)
+tests/
+htmlcov/
+.coverage
+coverage.xml
+dist/
+build/
+
+# Docs
+docs/
+*.md
+!README.md
+
+# Docker itself
+Dockerfile
+docker-compose*.yml
+.dockerignore

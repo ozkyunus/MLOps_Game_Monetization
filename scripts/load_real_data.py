@@ -10,9 +10,10 @@ Real event-level reference (Firebase Public Project — Flood It!):
   - raw_flood_it_users     (749 rows) — D7 aggregated user features
 """
 import os
+
 import pandas as pd
-from sqlalchemy import create_engine
 from dotenv import load_dotenv
+from sqlalchemy import create_engine
 
 load_dotenv()
 

@@ -14,6 +14,7 @@ from fastapi import FastAPI
 
 from src import models  # noqa: F401 — register SQLModel tables
 from src.database import create_db_and_tables
+from src.routers import channel, cohort, decide, personalized, propensity
 
 app = FastAPI(
     title="Player Monetization Intelligence Platform",
@@ -22,6 +23,11 @@ app = FastAPI(
 )
 
 create_db_and_tables()
+app.include_router(propensity.router)
+app.include_router(decide.router)
+app.include_router(channel.router)
+app.include_router(cohort.router)
+app.include_router(personalized.router)
 
 
 @app.get("/")

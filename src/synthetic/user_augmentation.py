@@ -25,20 +25,18 @@ Calibration validated in: notebooks/02_synthetic_validation.ipynb
 from __future__ import annotations
 
 import os
-import uuid
 import random
+import uuid
 from datetime import timedelta
 
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
-
 from sdv.metadata import SingleTableMetadata
 from sdv.single_table import GaussianCopulaSynthesizer
+from sqlalchemy import create_engine
 
 from src.synthetic import benchmarks as B
-
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 
@@ -98,7 +96,7 @@ def assign_segment(engagement: np.ndarray, will_purchase: np.ndarray) -> np.ndar
         whale_thr = np.quantile(payer_engagement, 0.90)
         dolphin_thr = np.quantile(payer_engagement, 0.50)
 
-        for i, idx in enumerate(np.where(payer_mask)[0]):
+        for _i, idx in enumerate(np.where(payer_mask)[0]):
             e = engagement[idx]
             if e >= whale_thr:
                 segments[idx] = "whale"
@@ -115,7 +113,10 @@ def generate_purchases(
 ) -> pd.DataFrame:
     """For each paying user, generate purchase events with cumulative LTV.
     Total LTV bounded by segment range (calibrated to real distribution).
-    Uses segment-specific IAP weights so whales buy bigger packs.
+    Uses segment-specific IAP weights AND channel LTV multiplier so:
+      - whales buy bigger packs (segment-specific IAP weights)
+      - TikTok users spend less per session (channel LTV multiplier ~0.6)
+      - Organic users spend baseline (multiplier 1.0)
     """
     rows = []
     txn_counter = txn_id_start
@@ -130,6 +131,11 @@ def generate_purchases(
 
         ltv_min, ltv_max = B.SEGMENT_LTV_RANGE_USD[seg]
         weights = B.IAP_WEIGHTS_BY_SEGMENT[seg]
+        # Apply channel LTV multiplier — narrows whale range for low-quality
+        # channels (TikTok), keeps Organic at full range.
+        chan_ltv_mult = B.CHANNEL_LTV_MULTIPLIER.get(user.get("type", "Organic"), 1.0)
+        ltv_max_chan = ltv_max * chan_ltv_mult
+        ltv_min_chan = ltv_min * chan_ltv_mult
         n_txn = random.randint(*n_txn_map[seg])
 
         cumulative = 0.0
@@ -137,11 +143,11 @@ def generate_purchases(
 
         for _ in range(n_txn):
             amount = float(np.random.choice(B.IAP_PRICES_USD, p=weights))
-            # Cap last txn so we don't blow past ltv_max
-            if cumulative + amount > ltv_max:
-                if cumulative >= ltv_min:
+            # Cap last txn so we don't blow past channel-adjusted ltv_max
+            if cumulative + amount > ltv_max_chan:
+                if cumulative >= ltv_min_chan:
                     break
-                amount = ltv_max - cumulative
+                amount = max(0.99, ltv_max_chan - cumulative)
             cumulative += amount
             txn_counter += 1
             days_after = random.randint(0, 30)
@@ -160,8 +166,19 @@ def generate_purchases(
 
 # ── Cohort generators ────────────────────────────────────────────────────────
 
-def generate_whale_cohort(synth: GaussianCopulaSynthesizer, n: int = 150) -> pd.DataFrame:
-    """High-engagement users sampled with iOS bias + premium geos."""
+def generate_whale_cohort(synth: GaussianCopulaSynthesizer, n: int | None = None) -> pd.DataFrame:
+    """High-engagement users sampled with iOS bias + premium geos.
+
+    Design notes:
+      - n defaults to B.WHALE_COHORT_SIZE (500) — large enough for ≥75 whale
+        samples in stratified test (was 8 in v1, statistically unusable).
+      - ~15% non-payers injected (B.WHALE_COHORT_NONPAYER_RATIO) — prevents
+        the "100% payer trivial F1" problem.
+      - augmented_whale is TRAIN-ONLY (filtered out of val/test in train
+        scripts). Evaluating on a designed-positive cohort would mask
+        real-world performance.
+    """
+    n = n if n is not None else B.WHALE_COHORT_SIZE
     df = synth.sample(num_rows=n)
     df["user_id"] = [str(uuid.uuid4()).upper().replace("-", "") for _ in range(n)]
     df["country"] = np.random.choice(
@@ -171,15 +188,42 @@ def generate_whale_cohort(synth: GaussianCopulaSynthesizer, n: int = 150) -> pd.
     df["platform"] = np.random.choice(["ios", "android"], size=n, p=[0.65, 0.35])
     df["_cohort"] = "augmented_whale"
 
-    # Whales are forced high-engagement (multiplier boosted)
-    channel_mult = np.full(n, 1.3)  # high baseline (organic-like)
-    df["_engagement_potential"] = sample_engagement_potential(n, channel_mult) * 2.0  # 2x boost
+    # Use the channel from synth output (organic-heavy via the SDV sampling),
+    # then apply our (calibrated stronger) channel multiplier.
+    chan_mult = df["type"].map(B.CHANNEL_ENGAGEMENT_MULTIPLIER).fillna(1.0).values
+    # Whales get a 3x boost on top of channel quality (was 2x, but with
+    # the new segment ladder we need top-quantile engagement to land in
+    # whale tier consistently).
+    df["_engagement_potential"] = sample_engagement_potential(n, chan_mult) * 3.0
     df["_sessions_d7"] = derive_sessions_d7(df["_engagement_potential"].values)
     df["_ad_views_d7"] = derive_ad_views_d7(df["_sessions_d7"].values)
-    # Whales virtually always purchase
-    df["_will_purchase"] = 1
-    # All payers — assign within whale/dolphin/minnow by engagement
-    df["_segment"] = assign_segment(df["_engagement_potential"].values, df["_will_purchase"].values)
+
+    # Forced segment composition (instead of engagement-quantile assignment):
+    # 60% whale, 20% dolphin, 5% minnow, 15% non-payer.
+    # This is what "whale cohort" should mean — designed to add whale rows
+    # to the dataset, not just "high-engagement users".
+    n_whale   = int(n * 0.60)
+    n_dolphin = int(n * 0.20)
+    n_minnow  = int(n * 0.05)
+    n - n_whale - n_dolphin - n_minnow
+
+    idx = np.random.permutation(n)
+    seg_array = np.empty(n, dtype=object)
+    will_purchase = np.zeros(n, dtype=int)
+
+    seg_array[idx[:n_whale]] = "whale"
+    will_purchase[idx[:n_whale]] = 1
+
+    seg_array[idx[n_whale:n_whale + n_dolphin]] = "dolphin"
+    will_purchase[idx[n_whale:n_whale + n_dolphin]] = 1
+
+    seg_array[idx[n_whale + n_dolphin:n_whale + n_dolphin + n_minnow]] = "minnow"
+    will_purchase[idx[n_whale + n_dolphin:n_whale + n_dolphin + n_minnow]] = 1
+
+    seg_array[idx[n_whale + n_dolphin + n_minnow:]] = "free"
+
+    df["_segment"] = seg_array
+    df["_will_purchase"] = will_purchase
     return df
 
 
@@ -208,12 +252,15 @@ def generate_geo_diversity_cohort(
 def generate_healthy_cohort(
     synth: GaussianCopulaSynthesizer, n: int = 1500
 ) -> pd.DataFrame:
-    """A 'later launch' cohort with slightly better engagement (industry-typical)."""
+    """A 'later launch' cohort with slightly better engagement (industry-typical).
+
+    install_date kept in Aug 2024 range (matching real backbone) — earlier
+    versions used Sep dates which broke any temporal-aware downstream task.
+    """
     df = synth.sample(num_rows=n)
     df["user_id"] = [str(uuid.uuid4()).upper().replace("-", "") for _ in range(n)]
-    # Override install_date to be later (different cohort)
     df["install_date"] = pd.to_datetime(
-        np.random.choice(pd.date_range("2024-09-15", "2024-09-30"), size=n)
+        np.random.choice(pd.date_range("2024-08-01", "2024-08-30"), size=n)
     )
     df["_cohort"] = "augmented_healthy"
 
@@ -247,7 +294,7 @@ def run() -> None:
 
     # Generate cohorts
     print("\nGenerating cohorts (forward-causal):")
-    whales = generate_whale_cohort(synth, n=150)
+    whales = generate_whale_cohort(synth)  # uses B.WHALE_COHORT_SIZE
     print(f"  ✓ whale_cohort:   {len(whales):>5,} users  | segments: {dict(whales['_segment'].value_counts())}")
 
     geos = generate_geo_diversity_cohort(synth, n=800)
