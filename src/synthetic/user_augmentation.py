@@ -41,7 +41,14 @@ from src.synthetic import benchmarks as B
 # ── Setup ────────────────────────────────────────────────────────────────────
 
 load_dotenv()
-engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+
+
+def get_engine():
+    """Lazy DB engine — created on first call, not at import time.
+    Keeps `import src.synthetic.user_augmentation` cheap and CI-safe when
+    `SQLALCHEMY_DATABASE_URL` is unset."""
+    return create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+
 
 SEED = 42
 random.seed(SEED)
@@ -279,6 +286,7 @@ def generate_healthy_cohort(
 # ── Main entry ───────────────────────────────────────────────────────────────
 
 def run() -> None:
+    engine = get_engine()
     print("Loading raw_user_source from Postgres...")
     real_users = pd.read_sql("SELECT * FROM raw_user_source", engine)
     print(f"  Real users: {len(real_users):,}")
