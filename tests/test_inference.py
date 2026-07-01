@@ -61,7 +61,7 @@ def test_predict_pltv_cohort_aware_default(sample_user_id):
     assert result["gate_threshold"] == pytest.approx(0.20)   # synth cohort
 
 
-def test_predict_pltv_unknown_user_raises():
+def test_predict_pltv_unknown_user_raises(needs_postgres, needs_models):
     """Feature fetcher must raise HTTPException (404) for unseen user_ids."""
     from fastapi import HTTPException
     from src.ml.inference import predict_pltv
