@@ -60,7 +60,7 @@ print("  v2: whale test≈45+ (CI tight)")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-banner("AUDIT 3 — Probability calibration after isotonic fix")
+banner("AUDIT 3 — Probability calibration (held-out test set from training split)")
 import joblib
 from sklearn.calibration import calibration_curve
 from sklearn.metrics import brier_score_loss
@@ -69,6 +69,18 @@ prop_path = max(glob.glob("saved_models/propensity_v*.joblib"), key=os.path.getm
 bundle = joblib.load(prop_path)
 model, encoders, feats = bundle["model"], bundle["encoders"], bundle["features"]
 threshold = bundle.get("default_threshold", 0.5)
+
+# ── Honest-split gate ──────────────────────────────────────────────────────
+# All model metrics below are computed ONLY on the test rows persisted in the
+# bundle at training time. Scoring the whole table would mostly re-score
+# training data and print optimistically biased numbers as "audit evidence".
+split_info = bundle.get("split")
+if not split_info:
+    raise SystemExit(
+        "✗ Propensity bundle has no 'split' record (predates the honest-audit fix).\n"
+        "  Retrain first:  uv run python -m src.ml.train_propensity"
+    )
+test_ids = set(split_info["test_user_ids"])
 
 work = df.copy()
 top = work["country"].value_counts().head(10).index
@@ -85,13 +97,25 @@ for c in feats:
 y = work["target_is_payer"].values
 proba = model.predict_proba(X)[:, 1]
 
-prob_true, prob_pred = calibration_curve(y, proba, n_bins=10, strategy="quantile")
+test_mask = work["user_id"].isin(test_ids).values
+missing = len(test_ids) - int(test_mask.sum())
+if missing:
+    raise SystemExit(
+        f"✗ {missing}/{len(test_ids)} test users from the training split are missing from\n"
+        f"  user_features_d7 — the table was regenerated after training (user_ids are\n"
+        f"  fresh UUIDs per augmentation run). Retrain before auditing."
+    )
+y_test, proba_test = y[test_mask], proba[test_mask]
+
+prob_true, prob_pred = calibration_curve(y_test, proba_test, n_bins=10, strategy="quantile")
 print(f"  Loaded: {prop_path} (method={bundle.get('method')}, threshold={threshold:.3f})")
+print(f"  Evaluating on held-out test set: n={int(test_mask.sum()):,} "
+      f"(of {len(work):,} total rows)")
 print(f"\n  {'pred_mean':>10} {'actual':>10} {'delta':>10}")
 for pt, pp in zip(prob_true, prob_pred, strict=False):
     print(f"  {pp:>10.3f} {pt:>10.3f} {pt - pp:+10.3f}")
-brier = brier_score_loss(y, proba)
-print(f"\n  Mean predicted P: {proba.mean():.4f}   Actual rate: {y.mean():.4f}")
+brier = brier_score_loss(y_test, proba_test)
+print(f"\n  Mean predicted P: {proba_test.mean():.4f}   Actual rate: {y_test.mean():.4f}")
 print(f"  Brier score (lower is better): {brier:.4f}   [v1: 0.1135]")
 max_d = float(np.max(np.abs(prob_true - prob_pred)))
 mean_d = float(np.mean(np.abs(prob_true - prob_pred)))
@@ -110,7 +134,7 @@ v1_true = [0.004, 0.007, 0.016, 0.023, 0.028, 0.055, 0.085, 0.211, 0.678]
 ax.plot(v1_pred, v1_true, "x--", label="v1 broken (Brier=0.114)", color="#dc2626", markersize=10, alpha=0.7)
 ax.set_xlabel("Mean predicted probability")
 ax.set_ylabel("Fraction actually positive")
-ax.set_title("Propensity Model — Reliability Diagram (v1 vs v2)")
+ax.set_title("Propensity Model — Reliability Diagram (v1 vs v2, held-out test)")
 ax.legend()
 ax.grid(alpha=0.3)
 plt.tight_layout()
@@ -120,14 +144,16 @@ print(f"\n  ✓ Calibration plot saved: {out_path}")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-banner("AUDIT 4 — Per-cohort performance (honest split)")
+banner("AUDIT 4 — Per-cohort performance (held-out test set)")
 from sklearn.metrics import f1_score, roc_auc_score
 
 work["pred_proba"] = proba
 work["pred"] = (proba > threshold).astype(int)
-for c in work["_cohort"].unique():
-    sub = work[work["_cohort"] == c]
+test_work = work[test_mask]
+for c in test_work["_cohort"].unique():
+    sub = test_work[test_work["_cohort"] == c]
     if len(sub) < 50 or sub["target_is_payer"].nunique() < 2:
+        print(f"  {c:<20}  n={len(sub):>5}  (too few test rows or single class — skipped)")
         continue
     auc = roc_auc_score(sub["target_is_payer"], sub["pred_proba"])
     f1 = f1_score(sub["target_is_payer"], sub["pred"], zero_division=0)
@@ -162,21 +188,29 @@ for c in ltv_feats:
     else:
         X_ltv[c] = pd.to_numeric(X_ltv[c], errors="coerce").fillna(0)
 
-_transform = ltv_bundle.get("target_transform", "log1p")
+# No silent default: a bundle missing this key must not be guessed at —
+# expm1() applied to a direct-$ model turns $30 into ~$10^13.
+_transform = ltv_bundle.get("target_transform")
+if _transform is None:
+    raise SystemExit("✗ LTV bundle missing 'target_transform' — retrain: uv run python -m src.ml.train_ltv")
 _raw_pred = ltv_model.predict(X_ltv)
 ltv_pred = np.expm1(np.maximum(_raw_pred, 0)) if _transform == "log1p" else np.maximum(_raw_pred, 0)
 work["pred_ltv"] = ltv_pred
 work["pred_pltv_raw"] = proba * ltv_pred
 work["pred_pltv_gated"] = np.where(proba < 0.20, 0.0, work["pred_pltv_raw"])
 
+# Gating stats restricted to the propensity test set: those non-payers were
+# never seen by the propensity model (and the LTV model trained payers-only).
+gate_scope = work[test_mask]
+print(f"(evaluated on propensity held-out test set, n={len(gate_scope):,})\n")
 print("LTV model raw output by true payer status:")
-print(work.groupby("target_is_payer")["pred_ltv"].describe()[["count", "mean", "50%", "max"]])
+print(gate_scope.groupby("target_is_payer")["pred_ltv"].describe()[["count", "mean", "50%", "max"]])
 
 print("\nFinal serving pLTV (after gate) — non-payers should be ≈ $0:")
-print(work.groupby("target_is_payer")["pred_pltv_gated"].describe()[["count", "mean", "50%", "max"]])
+print(gate_scope.groupby("target_is_payer")["pred_pltv_gated"].describe()[["count", "mean", "50%", "max"]])
 
 print("\n  v1 non-payers mean pLTV: ~$0.55  (raw $2.28 × p_payer)")
-print(f"  v2 non-payers mean pLTV: ${work[work['target_is_payer']==0]['pred_pltv_gated'].mean():.2f}  (gated)")
+print(f"  v2 non-payers mean pLTV: ${gate_scope[gate_scope['target_is_payer']==0]['pred_pltv_gated'].mean():.2f}  (gated)")
 
 
 print("\n" + "=" * 70)

@@ -16,13 +16,12 @@ first. Pre-warming xgboost sidesteps that.
 """
 from __future__ import annotations
 
-import xgboost  # noqa: F401  # MUST be first — see module docstring
-
 import glob
 import os
 from pathlib import Path
 
 import pytest
+import xgboost  # noqa: F401  # MUST be first — see module docstring
 from dotenv import load_dotenv
 
 # Load .env so tests inherit the same DB URL / MLflow URI as the app.
@@ -100,6 +99,7 @@ def sample_user_id(needs_postgres) -> str:
 def api_client(needs_postgres, needs_models):
     """TestClient wired to the real FastAPI app (with lifespan)."""
     from fastapi.testclient import TestClient
+
     from src.main import app
     with TestClient(app) as client:
         yield client

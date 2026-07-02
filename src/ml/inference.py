@@ -168,7 +168,14 @@ def predict_pltv(user_id: str, gate_threshold: float | None = None) -> dict:
     # Stage 2 — LTV regressor (target_transform-aware)
     l_feats = apply_encoders(raw, models["ltv"])
     ltv_pred = float(models["ltv"]["model"].predict(l_feats)[0])
-    transform = models["ltv"].get("target_transform", "log1p")
+    # No silent default: guessing "log1p" for a direct-$ model would expm1()
+    # a $30 prediction into ~$10^13. A bundle missing the key must fail loudly.
+    transform = models["ltv"].get("target_transform")
+    if transform is None:
+        raise HTTPException(
+            status_code=500,
+            detail="LTV bundle missing 'target_transform' — retrain the LTV model",
+        )
     if transform == "log1p":
         expected_ltv_if_payer = float(np.expm1(max(ltv_pred, 0.0)))
     else:  # "none" / direct $ regression

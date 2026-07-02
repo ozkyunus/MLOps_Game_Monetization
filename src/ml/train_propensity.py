@@ -26,6 +26,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import warnings
 
@@ -196,6 +197,21 @@ def main():
     print(f"  Train cohorts:    {dict(train['_cohort'].value_counts())}")
     print(f"  Test cohorts:     {dict(test['_cohort'].value_counts())}")
 
+    # Persist split membership in the bundle. Audit scripts must evaluate on
+    # the TRUE held-out rows — reconstructing the split from the current table
+    # silently breaks the moment the table is regenerated (user_ids are fresh
+    # UUIDs every augmentation run), turning "test" metrics into train metrics.
+    split_record = {
+        "seed": SEED,
+        "dataset_fingerprint": hashlib.sha256(
+            "|".join(sorted(df["user_id"].astype(str))).encode()
+        ).hexdigest()[:16],
+        "n_rows_at_train": len(df),
+        "train_user_ids": train["user_id"].tolist(),
+        "val_user_ids":   val["user_id"].tolist(),
+        "test_user_ids":  test["user_id"].tolist(),
+    }
+
     X_train, y_train, encoders = prepare_features(train)
     X_val,   y_val,   _ = prepare_features(val,  encoders=encoders)
     X_test,  y_test,  _ = prepare_features(test, encoders=encoders)
@@ -357,6 +373,7 @@ def main():
             "features":          list(X_train.columns),
             "method":            "isotonic_calibrated",
             "default_threshold": best_t,   # F1-optimal threshold from val
+            "split":             split_record,  # held-out membership for honest audits
         }, local_path)
         mlflow.log_artifact(local_path)
 

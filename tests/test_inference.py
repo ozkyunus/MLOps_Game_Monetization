@@ -24,6 +24,21 @@ def test_propensity_features_match_ltv(needs_models):
     assert set(models["propensity"]["features"]) == set(models["ltv"]["features"])
 
 
+def test_bundles_contain_persisted_split(needs_models):
+    """Honest audits depend on the train/val/test membership being persisted at
+    training time — reconstruction breaks silently when the table regenerates."""
+    from src.ml.inference import load_models
+    models = load_models()
+    for tower in ("propensity", "ltv"):
+        split = models[tower].get("split")
+        assert split, f"{tower} bundle missing 'split' record — retrain with updated trainer"
+        train_ids = set(split["train_user_ids"])
+        test_ids = set(split["test_user_ids"])
+        assert train_ids and test_ids, f"{tower}: empty split id lists"
+        assert not (train_ids & test_ids), f"{tower}: train/test sets overlap"
+        assert split.get("dataset_fingerprint"), f"{tower}: missing dataset fingerprint"
+
+
 def test_predict_pltv_returns_full_shape(sample_user_id):
     from src.ml.inference import predict_pltv
     result = predict_pltv(sample_user_id)
@@ -64,6 +79,7 @@ def test_predict_pltv_cohort_aware_default(sample_user_id):
 def test_predict_pltv_unknown_user_raises(needs_postgres, needs_models):
     """Feature fetcher must raise HTTPException (404) for unseen user_ids."""
     from fastapi import HTTPException
+
     from src.ml.inference import predict_pltv
     with pytest.raises(HTTPException) as ex:
         predict_pltv("this-user-does-not-exist-in-the-db-abc123")

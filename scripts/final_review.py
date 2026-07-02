@@ -9,6 +9,7 @@ Answers four questions:
 """
 import glob
 import os
+import sys
 
 import joblib
 import numpy as np
@@ -24,11 +25,14 @@ from sklearn.metrics import (
     recall_score,
     roc_auc_score,
 )
-from sklearn.model_selection import train_test_split
 from sqlalchemy import create_engine
 
 load_dotenv()
 e = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+
+# Hard failures collected along the way; the script exits non-zero at the end
+# if any accumulated — a review that can't fail loudly isn't a review.
+FAILURES: list[str] = []
 
 
 def banner(title, char="═"):
@@ -92,12 +96,22 @@ for cohort in df["_cohort"].unique():
     try:
         r_ltv, p_ltv = pearsonr(sub["_engagement_potential"], sub["target_ltv"])
         r_pay, p_pay = pearsonr(sub["_engagement_potential"], sub["target_is_payer"])
-        verdict = "✓ clean" if abs(r_ltv) < 0.1 and "real" in cohort else (
-            "✓ causal" if r_ltv > 0.5 else "neutral"
-        )
+        # Real cohort must be uncorrelated — anything else means the v1
+        # leakage regressed. Synth cohorts are causal BY DESIGN (engagement
+        # generates purchases there), so high r is expected, not leakage.
+        if "real" in cohort:
+            if abs(r_ltv) < 0.1:
+                verdict = "✓ clean"
+            else:
+                verdict = "❌ LEAKAGE REGRESSION"
+                FAILURES.append(
+                    f"real cohort r(eng,ltv)={r_ltv:+.3f} — the v1 target-leakage bug is back"
+                )
+        else:
+            verdict = "✓ causal (by design)" if r_ltv > 0.5 else "neutral"
         print(f"  {cohort:18s} n={len(sub):>5}  r(eng,ltv)={r_ltv:+.3f}  r(eng,payer)={r_pay:+.3f}  {verdict}")
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"  {cohort:18s} n={len(sub):>5}  (skipped: {exc})")
 
 
 # ═══════════════════════════════════════════════════════════════════════════
@@ -127,49 +141,41 @@ for c in features:
         X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0)
 y = work["target_is_payer"].values
 
-# Re-create the exact training split to measure train vs test AUC honestly
-strat = (
-    df["target_is_payer"].astype(str) + "_"
-    + df["_cohort"].astype(str) + "_"
-    + df["_segment"].astype(str)
-)
-strat_counts = strat.value_counts()
-keep = strat.isin(strat_counts[strat_counts >= 3].index)
-df_split = df[keep].copy()
-strat = strat[keep]
-train_idx, temp_idx = train_test_split(
-    np.arange(len(df_split)), test_size=0.30, random_state=42, stratify=strat
-)
-strat_t = (
-    df_split.iloc[temp_idx]["target_is_payer"].astype(str) + "_"
-    + df_split.iloc[temp_idx]["_cohort"].astype(str) + "_"
-    + df_split.iloc[temp_idx]["_segment"].astype(str)
-)
-counts_t = strat_t.value_counts()
-keep_t = strat_t.isin(counts_t[counts_t >= 2].index)
-temp_kept = temp_idx[keep_t.values]
-val_idx, test_idx = train_test_split(
-    temp_kept, test_size=0.50, random_state=42,
-    stratify=strat_t[keep_t.values]
-)
+# Use the split persisted in the bundle at training time. Reconstructing it
+# from the current table silently breaks whenever the table was regenerated
+# after training (user_ids are fresh UUIDs each augmentation run) — the
+# "test" set would then overlap the model's real training data.
+split_info = bundle.get("split")
+if not split_info:
+    raise SystemExit(
+        "✗ Propensity bundle has no 'split' record (predates the honest-audit fix).\n"
+        "  Retrain first:  uv run python -m src.ml.train_propensity"
+    )
 
-# We need original-positional X for split; re-prep on df_split
-work_split = df_split.copy()
-work_split["country"] = work_split["country"].where(work_split["country"].isin(top), other="Other")
-X_split = pd.DataFrame({f: work_split[f] if f in work_split.columns else 0 for f in features})
-for c in features:
-    if c in encoders:
-        le = encoders[c]
-        known = set(le.classes_)
-        X_split[c] = X_split[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-        X_split[c] = le.transform(X_split[c])
-    else:
-        X_split[c] = pd.to_numeric(X_split[c], errors="coerce").fillna(0)
-y_split = work_split["target_is_payer"].values
 
-X_train = X_split.iloc[train_idx]; y_train = y_split[train_idx]
-X_val   = X_split.iloc[val_idx];   y_val   = y_split[val_idx]
-X_test  = X_split.iloc[test_idx];  y_test  = y_split[test_idx]
+def _split_mask(frame: pd.DataFrame, ids: list, label: str) -> np.ndarray:
+    id_set = set(ids)
+    mask = frame["user_id"].isin(id_set).values
+    n_missing = len(id_set) - int(mask.sum())
+    if n_missing:
+        raise SystemExit(
+            f"✗ {n_missing}/{len(id_set)} {label} users from the training split are missing\n"
+            f"  from user_features_d7 — the table was regenerated after training.\n"
+            f"  Retrain before reviewing."
+        )
+    return mask
+
+
+train_mask = _split_mask(work, split_info["train_user_ids"], "train")
+val_mask   = _split_mask(work, split_info["val_user_ids"],   "val")
+test_mask  = _split_mask(work, split_info["test_user_ids"],  "test")
+print(f"  Split loaded from bundle: train={int(train_mask.sum()):,}  "
+      f"val={int(val_mask.sum()):,}  test={int(test_mask.sum()):,}  "
+      f"(fingerprint {split_info.get('dataset_fingerprint', '?')})")
+
+X_train = X[train_mask]; y_train = y[train_mask]
+X_val   = X[val_mask];   y_val   = y[val_mask]
+X_test  = X[test_mask];  y_test  = y[test_mask]
 
 proba_train = model.predict_proba(X_train)[:, 1]
 proba_val   = model.predict_proba(X_val)[:, 1]
@@ -204,7 +210,7 @@ print(f"  F1:        {f1_score(y_test, pred, zero_division=0):.4f}")
 # ═══════════════════════════════════════════════════════════════════════════
 banner("4 — PROPENSITY — per-cohort performance (where does it work?)", "═")
 # ═══════════════════════════════════════════════════════════════════════════
-test_df = df_split.iloc[test_idx].copy()
+test_df = df[test_mask].copy()
 test_df["proba"] = proba_test
 test_df["pred"] = pred
 print(f"\n{'Cohort':<22}{'n':>6}{'payer%':>10}{'AUC':>8}{'F1':>8}{'Brier':>8}")
@@ -284,7 +290,10 @@ for c in ltv_feats:
         X_ltv[c] = pd.to_numeric(X_ltv[c], errors="coerce").fillna(0)
 
 y_ltv = payers["target_ltv"].values
-_transform = lt.get("target_transform", "log1p")
+# No silent default — expm1() applied to a direct-$ model would turn $30 into ~$10^13.
+_transform = lt.get("target_transform")
+if _transform is None:
+    raise SystemExit("✗ LTV bundle missing 'target_transform' — retrain: uv run python -m src.ml.train_ltv")
 def _ltv_predict(X):
     raw = ltv_model.predict(X)
     if _transform == "log1p":
@@ -292,35 +301,31 @@ def _ltv_predict(X):
     return np.maximum(raw, 0)  # "none" / direct $
 preds = _ltv_predict(X_ltv)
 
-# Split for overfit indication
-strat_ltv = payers["_cohort"].astype(str) + "_" + payers["_segment"].astype(str)
-counts = strat_ltv.value_counts()
-keep_ltv = strat_ltv.isin(counts[counts >= 3].index)
-payers_k = payers[keep_ltv].reset_index(drop=True)
-y_ltv_k = payers_k["target_ltv"].values
-X_ltv_k = X_ltv[keep_ltv.values].reset_index(drop=True)
-strat_ltv_k = (payers_k["_cohort"].astype(str) + "_" + payers_k["_segment"].astype(str))
+# Use the LTV model's own persisted split (payers-only, distinct from the
+# propensity split) instead of reconstructing it.
+ltv_split = lt.get("split")
+if not ltv_split:
+    raise SystemExit(
+        "✗ LTV bundle has no 'split' record (predates the honest-audit fix).\n"
+        "  Retrain first:  uv run python -m src.ml.train_ltv"
+    )
+ltv_train_mask = _split_mask(payers, ltv_split["train_user_ids"], "LTV-train")
+ltv_test_mask  = _split_mask(payers, ltv_split["test_user_ids"],  "LTV-test")
+print(f"  Split loaded from bundle: train={int(ltv_train_mask.sum()):,}  "
+      f"test={int(ltv_test_mask.sum()):,}")
 
-tr_idx, te_idx = train_test_split(np.arange(len(payers_k)), test_size=0.30, random_state=42, stratify=strat_ltv_k)
-strat_temp = strat_ltv_k.iloc[te_idx]
-counts_temp = strat_temp.value_counts()
-keep_temp = strat_temp.isin(counts_temp[counts_temp >= 2].index)
-te_idx_kept = te_idx[keep_temp.values]
-v_idx, t_idx = train_test_split(te_idx_kept, test_size=0.50, random_state=42,
-                                 stratify=strat_temp[keep_temp.values])
-
-preds_tr = _ltv_predict(X_ltv_k.iloc[tr_idx])
-preds_te = _ltv_predict(X_ltv_k.iloc[t_idx])
+preds_tr = _ltv_predict(X_ltv[ltv_train_mask])
+preds_te = _ltv_predict(X_ltv[ltv_test_mask])
 
 print("\nOverfit check (R² on train vs test):")
-r2_tr = r2_score(y_ltv_k[tr_idx], preds_tr)
-r2_te = r2_score(y_ltv_k[t_idx], preds_te)
+r2_tr = r2_score(y_ltv[ltv_train_mask], preds_tr)
+r2_te = r2_score(y_ltv[ltv_test_mask], preds_te)
 print(f"  Train R²: {r2_tr:.3f}")
 print(f"  Test  R²: {r2_te:.3f}")
 print(f"  Gap:      {r2_tr - r2_te:+.3f}  ({'✓ small' if r2_tr - r2_te < 0.10 else '⚠ overfit'})")
 
 print("\nMAE per segment (test):")
-test_p = payers_k.iloc[t_idx].copy()
+test_p = payers[ltv_test_mask].copy()
 test_p["pred"] = preds_te
 for seg in ["whale", "dolphin", "minnow"]:
     sub = test_p[test_p["_segment"] == seg]
@@ -425,3 +430,10 @@ Underfit/Overfit:
   - See sections 3 and 7 above for train-test gap analysis
   - Both gaps should be small (<5% AUC, <10% R²)
 """)
+
+if FAILURES:
+    banner("❌ REVIEW FAILED — hard failures detected", "═")
+    for msg in FAILURES:
+        print(f"  ✗ {msg}")
+    sys.exit(1)
+print("✓ Review passed with no hard failures.")

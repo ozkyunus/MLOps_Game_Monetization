@@ -26,6 +26,7 @@ Outputs:
 """
 from __future__ import annotations
 
+import hashlib
 import os
 import warnings
 
@@ -169,6 +170,19 @@ def main():
     print("  Test segment mix:")
     print("    " + test["_segment"].value_counts().to_string().replace("\n", "\n    "))
 
+    # Persist split membership for honest audits (see train_propensity.py for
+    # the full rationale — reconstruction breaks on regenerated tables).
+    split_record = {
+        "seed": SEED,
+        "dataset_fingerprint": hashlib.sha256(
+            "|".join(sorted(df_all["user_id"].astype(str))).encode()
+        ).hexdigest()[:16],
+        "n_rows_at_train": len(df_all),
+        "train_user_ids": train["user_id"].tolist(),
+        "val_user_ids":   val["user_id"].tolist(),
+        "test_user_ids":  test["user_id"].tolist(),
+    }
+
     X_train, y_train, encoders = prepare_features(train)
     X_val,   y_val,   _ = prepare_features(val,  encoders=encoders)
     X_test,  y_test,  _ = prepare_features(test, encoders=encoders)
@@ -279,6 +293,7 @@ def main():
             "target_transform":   "none",          # direct $ with Huber loss
             "objective":          "huber_direct",
             "trained_on":         "payers_only",
+            "split":              split_record,    # held-out membership for honest audits
         }, local_path)
         mlflow.log_artifact(local_path)
         mlflow.xgboost.log_model(model, artifact_path="ltv_model",

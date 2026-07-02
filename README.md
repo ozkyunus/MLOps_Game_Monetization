@@ -28,18 +28,23 @@ mobile-game backend, plus a Streamlit dashboard that consumes them:
 
 ## 🏆 Headline Metrics (After Audit + Fixes)
 
-| Metric | v1 (leaky) | v2 (honest) | Δ |
-|---|---|---|---|
-| Test AUC (real cohort) | 0.915 ⚠ *leakage* | **0.58** | dürüst |
-| Test AUC (synth cohort) | ~0.90 | **0.82 – 0.88** | production-realistic |
-| Brier score | 0.114 | **0.092** | −19% |
-| Max calibration Δ | **0.40** *(broken)* | **0.031** | −92% |
-| Mean predicted P | 0.33 (vs actual 0.11) | **0.125 = 0.125 ✓** | calibrated |
-| Whale test n | 8 (useless) | **51** | 6.4× |
-| Non-payer served pLTV | $0.55 | **$0.19** (gated) | −65% |
+All v2.1 numbers are measured **strictly on the held-out test split persisted
+in the model bundle at training time** — see Limitations §9 for why that
+qualifier matters.
 
-Full audit table in `scripts/final_review.py`, calibration plot at
-`saved_models/calibration_curve.png`.
+| Metric | v1 (leaky) | v2.1 (honest, held-out test) |
+|---|---|---|
+| Test AUC (combined) | 0.898 ⚠ *inflated* | **0.61** |
+| Test AUC (real cohort) | 0.915 ⚠ *leakage* | **0.49** — no telemetry, no signal |
+| Test AUC (synth cohorts) | ~0.90 | **0.66 – 0.87** — production-realistic |
+| Brier score | 0.114 | **0.103** |
+| Max calibration Δ | **0.40** *(broken)* | **0.061** |
+| Mean predicted P | 0.33 (vs actual 0.11 — 3× off) | **0.125 vs 0.125 ✓** |
+| Whale test n | 8 (useless) | **51** (CI ±$4.65) |
+| Non-payer served pLTV | $0.55 | **median $0** (gated; mean $0.72 from FP tail) |
+
+Full audit in `scripts/final_review.py` (exits non-zero on hard failures),
+calibration plot at `saved_models/calibration_curve.png`.
 
 ---
 
@@ -412,28 +417,47 @@ Gemini calls. Without it, it falls back to 12 hand-written templates
 keyed on (segment, action, context). The fallback is a deterministic
 demo; the LLM call is the real product.
 
-### 8. v1 → v2 audit deltas
+### 8. v1 → v2.1 audit deltas
 
 Regenerate with `uv run python -m scripts.audit_models`.
 
-| Metric | v1 (with leakage, scale_pos_weight=8) | v2 (calibrated, leak-free) |
+| Metric | v1 (with leakage, scale_pos_weight=8) | v2.1 (calibrated, leak-free, held-out) |
 |---|---|---|
-| Test AUC (combined) | 0.898 ← inflated | 0.640 ← honest |
-| Test AUC (synth cohorts) | similar | 0.82-0.88 |
-| Test AUC (real cohort) | 0.915 ← leakage | 0.58 ← honest |
-| Brier score | 0.114 | **0.092** |
-| Max calibration delta | **0.40** ← broken | 0.031 |
+| Test AUC (combined) | 0.898 ← inflated | 0.614 ← honest |
+| Test AUC (synth cohorts) | similar | 0.66-0.87 |
+| Test AUC (real cohort) | 0.915 ← leakage | 0.49 ← honest |
+| Brier score | 0.114 | **0.103** |
+| Max calibration delta | **0.40** ← broken | 0.061 |
 | Mean predicted P | 0.33 vs actual 0.11 (3× off) | 0.125 vs 0.125 ✓ |
 | Whale test n | 8 | **51** |
-| Non-payer mean predicted pLTV | $0.55 | **$0.19** (gated) |
+| Non-payer served pLTV | $0.55 mean | **median $0** (gated; mean $0.72) |
 
-**Headline interpretation**: AUC dropped from 0.90 to 0.64 not because the
+**Headline interpretation**: AUC dropped from 0.90 to ~0.61 not because the
 model got worse — but because we removed the leaked signal that was
-producing the inflated number. **0.64 is the honest baseline** for what
+producing the inflated number. **~0.61 is the honest baseline** for what
 you can predict from demographics alone when you don't have behavioral
-telemetry. The synth-cohort 0.82-0.88 is what we'd expect with telemetry.
+telemetry. The synth-cohort 0.66-0.87 is what we'd expect with telemetry.
 
-### 9. What this proves for an interviewer
+### 9. The audit itself had a bug (fixed in v2.1)
+
+The v2 audit script scored the **entire feature table** — ~80% of which is
+the model's own training data — and reported those numbers as "honest split"
+metrics (Brier 0.092, max calibration Δ 0.031). A code review caught it.
+
+**v2.1 fix**: training now persists the exact train/val/test `user_id`
+membership (plus a dataset fingerprint) inside the model bundle;
+`audit_models.py` and `final_review.py` refuse to run unless every persisted
+test row is still present, and compute all metrics strictly on that held-out
+set. The honest numbers are slightly worse (Brier 0.103, max Δ 0.061) —
+which is exactly the point. The leakage check in `final_review.py` was also
+fixed: it previously printed "✓ causal" for a re-leaked real cohort; it now
+fails the run with a non-zero exit code.
+
+**Lesson**: an audit that can't fail loudly isn't an audit. The reviewer you
+should trust least is the one grading their own homework on their own
+training data.
+
+### 10. What this proves for an interviewer
 
 | Skill | Where it shows |
 |---|---|
@@ -477,11 +501,12 @@ source inline.
 - ✅ SDV synthetic data with industry-calibrated benchmarks
 - ✅ Streamlit dashboard (7 pages · bilingual TR/EN toggle)
 - ✅ Docker Compose stack (Postgres + MLflow + API + Streamlit)
-- ✅ Honest audit script + calibration reliability plot
+- ✅ Honest audit: metrics locked to the held-out split persisted in the bundle
+- ✅ GitHub Actions CI (ruff + pytest + docker build on PR)
+- ✅ pytest suite (51 tests: benchmarks, synthetic gen, inference, routers)
+- ✅ Real Gemini offer copy via LangChain (with offline fallback templates)
 
 **Next** (in scope but not on this branch):
-- 🔜 GitHub Actions CI (lint + docker build + pytest)
-- 🔜 pytest smoke tests (inference + routers)
 - 🔜 Drift detection service (populates `driftlog` table)
 - 🔜 Kubernetes manifests (`k8s/` scaffold)
 - 🔜 Prometheus / Grafana monitoring

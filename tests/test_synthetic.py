@@ -5,16 +5,13 @@ Pure-numpy: no DB, no SDV fitting, no MLflow. Fast — these run in milliseconds
 from __future__ import annotations
 
 import numpy as np
-import pytest
 
-from src.synthetic import benchmarks as B
 from src.synthetic.user_augmentation import (
     decide_purchase,
     derive_ad_views_d7,
     derive_sessions_d7,
     sample_engagement_potential,
 )
-
 
 rng = np.random.default_rng(42)
 

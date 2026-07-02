@@ -1,14 +1,12 @@
 """
 Player Monetization Intelligence Platform — FastAPI entry point.
 
-Services (each will be a separate router):
-  1. /propensity     — purchase probability + expected amount
+Services (one router each):
+  1. /propensity     — calibrated p_payer + gated pLTV
   2. /decide         — IAP vs Ad vs Skip decision engine
-  3. /ad-cap         — per-user ad fatigue + recommended daily cap
-  4. /segment        — clustering-based player segment
+  3. /channel        — per-channel CPI / ROAS / payback
+  4. /cohort         — D1/D7/D30 proxy retention vs benchmarks
   5. /personalized   — LLM-generated offer copy
-
-Auth + user management via /auth.
 """
 from fastapi import FastAPI
 
@@ -36,20 +34,10 @@ def root():
         "message": "Player Monetization Intelligence Platform",
         "version": "0.1.0",
         "docs": "/docs",
-        "services": ["propensity", "decide", "ad-cap", "segment", "personalized"],
+        "services": ["propensity", "decide", "channel", "cohort", "personalized"],
     }
 
 
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
-
-# Routers will be wired in Day 2-4:
-# from src.routers import auth, propensity, decide, ad_cap, segment, personalized
-# app.include_router(auth.router)
-# app.include_router(propensity.router)
-# app.include_router(decide.router)
-# app.include_router(ad_cap.router)
-# app.include_router(segment.router)
-# app.include_router(personalized.router)
