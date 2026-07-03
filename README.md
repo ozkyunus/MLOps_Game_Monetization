@@ -48,50 +48,61 @@ calibration plot at `saved_models/calibration_curve.png`.
 
 ---
 
-## 🚀 Quick Start (Docker — Recommended)
+## 🚀 Quick Start
+
+**Honest prerequisites** — two things are deliberately NOT in git, so a fresh
+clone needs a one-time setup before the stack is fully alive:
+- **Raw datasets** (`data/raw/*.csv`) — excluded for size + licensing.
+  Sources: Kaggle *Marketing Freemium Game* + Firebase *Flood It!* sample
+  (see Citations at the bottom). Place the CSVs under `data/raw/`.
+- **Model artifacts** (`saved_models/*.joblib`) — produced by the training
+  step below; predict endpoints return errors until they exist.
 
 ```bash
 git clone <this-repo> && cd MLOps_Capstone
-cp .env.example .env         # edit POSTGRES_PASSWORD, JWT_SECRET, GOOGLE_API_KEY
-docker compose up -d --build # first build ~5-8 min (SDV + XGBoost heavy deps)
+cp .env.example .env          # REQUIRED: set POSTGRES_PASSWORD (compose
+                              # refuses to start without it), keep the same
+                              # password inside SQLALCHEMY_DATABASE_URL
 
-open http://localhost:8501   # 🎨 Streamlit dashboard  (main UI)
-open http://localhost:8000/docs  # 📖 FastAPI Swagger
-open http://localhost:5001   # 🧪 MLflow tracking + registry
+# 1 — infrastructure (Postgres + MLflow + API + dashboard containers)
+docker compose up -d --build  # first build ~5-8 min (SDV + XGBoost deps)
 
-# Control
-docker compose logs -f api          # tail API logs
-docker compose down                 # stop (keeps Postgres volume)
-docker compose down -v              # stop + wipe data (fresh start)
-```
+# 2 — one-time data pipeline (host-side, talks to localhost:5434)
+uv sync
+uv run python -m scripts.load_real_data           # CSVs → Postgres
+uv run python -m src.synthetic.user_augmentation  # calibrated SDV synthesis
+uv run python -m scripts.build_features           # → user_features_d7
 
-The `monetization_postgres_data` volume is external, so `docker compose down`
-preserves your data.
-
-## 🛠 Bare-metal Quick Start (dev)
-
-```bash
-# 1. Infra containers only
-docker start monetization_postgres monetization_mlflow
-
-# 2. Data pipeline (one-time)
-uv run python -m scripts.load_real_data          # CSV → Postgres
-uv run python -m src.synthetic.user_augmentation # SDV synthesis
-uv run python -m scripts.build_features          # build user_features_d7
-
-# 3. Train models (creates saved_models/*.joblib + MLflow runs)
+# 3 — train both towers (≈1 min total; logs to MLflow, saves joblib bundles)
 uv run python -m src.ml.train_propensity
 uv run python -m src.ml.train_ltv
+curl -X POST http://localhost:8000/admin/reload-models   # hot-swap, no restart
 
-# 4. Serve
+# 4 — explore
+open http://localhost:8501        # 🎨 Streamlit dashboard  (main UI)
+open http://localhost:8000/docs   # 📖 FastAPI Swagger
+open http://localhost:5001        # 🧪 MLflow tracking + registry
+
+# Control
+curl http://localhost:8000/readyz   # dependency-aware readiness check
+docker compose logs -f api          # tail API logs
+docker compose down                 # stop (KEEPS the Postgres volume)
+docker compose down -v              # stop + wipe data (true fresh start)
+```
+
+## 🛠 Bare-metal dev loop (API/dashboard outside Docker)
+
+```bash
+docker compose up -d postgres mlflow    # infra containers only
+
 uv run uvicorn src.main:app --port 8000 --reload
-
-# 5. Dashboard
 uv run streamlit run dashboard/Home.py --server.port 8501
 
-# 6. Audit
-uv run python -m scripts.audit_models   # generates calibration_curve.png
-uv run python -m scripts.final_review   # 10-section honesty report
+# Audits (rerun after every retrain)
+uv run python -m scripts.audit_models   # calibration_curve.png, held-out only
+uv run python -m scripts.final_review   # 10-section review, exits 1 on failure
+uv run pytest                           # 60+ tests (integration auto-skips
+                                        #   without Postgres + models)
 ```
 
 ---

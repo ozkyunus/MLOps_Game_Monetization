@@ -1,10 +1,11 @@
 # ───────────────────────────────────────────────────────────────────────────
 # Player Monetization Intelligence Platform — full stack
 #
-#   docker compose up -d           # start everything
+#   cp .env.example .env           # set POSTGRES_PASSWORD (required)
+#   docker compose up -d --build   # start everything
 #   docker compose logs -f api     # tail API logs
-#   docker compose down            # stop and remove containers
-#   docker compose down -v         # ...and wipe named volumes (fresh DB!)
+#   docker compose down            # stop (keeps the data volume)
+#   docker compose down -v         # stop AND wipe the data volume
 #
 # Services:
 #   • postgres   — Postgres 16, holds real/synth users + prediction logs
@@ -12,9 +13,13 @@
 #   • api        — FastAPI service (5 endpoints on :8000)
 #   • dashboard  — Streamlit dashboard on :8501 (consumes the API)
 #
-# Networking: services reach each other via service names on the default
-# bridge network (`postgres`, `mlflow`, `api`). Only ports we expose to the
-# host are the ones a human/dev needs.
+# Secrets: POSTGRES_PASSWORD has NO default on purpose — compose refuses to
+# start without it (a real password was once committed as a default here;
+# never again). Values come from .env, which is gitignored.
+#
+# Networking: services reach each other via service names (`postgres`,
+# `mlflow`, `api`). The dashboard's *browser-facing* links use PUBLIC_* URLs
+# because the user's browser can't resolve compose hostnames.
 # ───────────────────────────────────────────────────────────────────────────
 
 services:
@@ -26,7 +31,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-train}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set — cp .env.example .env and fill it in}
       POSTGRES_DB: ${POSTGRES_DB:-monetization_db}
     ports:
       - "5434:5432"                          # host:container
@@ -82,17 +87,14 @@ services:
         condition: service_healthy
     environment:
       # Compose-network hostnames (postgres, mlflow) instead of localhost.
-      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}@postgres:5432/${POSTGRES_DB:-monetization_db}
+      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-monetization_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      APP_ENV: production
-      LOG_LEVEL: INFO
     ports:
       - "8000:8000"
     volumes:
       # Model artifacts as a read-only mount so we can retrain on the host
-      # and just restart the API — no rebuild needed.
+      # and hit POST /admin/reload-models — no rebuild needed.
       - ./saved_models:/app/saved_models:ro
 
   # ═════════════════════════════════════════════════════════════════════════
@@ -103,18 +105,31 @@ services:
     restart: unless-stopped
     depends_on:
       api:
-        condition: service_started
+        condition: service_healthy
     environment:
-      # Streamlit reaches FastAPI over the compose network.
+      # Server-side calls go over the compose network...
       API_URL: http://api:8000
-      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:-REDACTED_ROTATED_PASSWORD}@postgres:5432/${POSTGRES_DB:-monetization_db}
+      SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-monetization_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
+      # ...but the link buttons open in the USER'S browser, which cannot
+      # resolve `api` / `mlflow` — hence separate public URLs.
+      PUBLIC_API_URL: ${PUBLIC_API_URL:-http://localhost:8000}
+      PUBLIC_MLFLOW_URL: ${PUBLIC_MLFLOW_URL:-http://localhost:5001}
     ports:
       - "8501:8501"
     volumes:
       # Same read-only saved_models mount so the "Model Registry" page can
       # show the calibration_curve.png artifact.
       - ./saved_models:/app/saved_models:ro
+    # The image's baked-in HEALTHCHECK probes the API port (:8000), but this
+    # container runs Streamlit — without this override it sat permanently
+    # "unhealthy" and broke `docker compose up --wait`.
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8501/_stcore/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     command: >
       streamlit run dashboard/Home.py
         --server.port=8501
@@ -123,8 +138,11 @@ services:
         --browser.gatherUsageStats=false
 
 # ───────────────────────────────────────────────────────────────────────────
-# Named volumes (Docker-managed, survive `down` — need `down -v` to wipe)
+# Named volume. `name:` pins the exact Docker volume name WITHOUT declaring
+# it external — compose creates it on a fresh machine (external: true used to
+# abort `docker compose up` on every machine but the author's) and reuses the
+# existing one where it already exists. `down -v` really wipes it.
 # ───────────────────────────────────────────────────────────────────────────
 volumes:
   monetization_postgres_data:
-    external: true       # attach to the volume you already have from earlier work
+    name: monetization_postgres_data

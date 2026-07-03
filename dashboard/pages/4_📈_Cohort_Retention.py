@@ -84,12 +84,23 @@ with st.sidebar:
 try:
     data = fetch_cohort(dim)
 except Exception as ex:
-    st.error(f"API call failed: {ex}")
+    st.error(L("API çağrısı başarısız", "API call failed") + f": {ex}")
     st.stop()
 
 
-overall = data["overall"]
-cohorts = pd.DataFrame(data["cohorts"])
+overall = data.get("overall") or {}
+cohort_rows = data.get("cohorts") or []
+if not cohort_rows or any(
+    overall.get(k) is None
+    for k in ("installs", "d1_retention", "d7_retention", "d30_retention")
+):
+    st.info(L(
+        "Henüz veri yok — veritabanı boş görünüyor. Önce veri pipeline'ını çalıştır.",
+        "No data yet — the database appears to be empty. Run the data pipeline first.",
+    ))
+    st.stop()
+
+cohorts = pd.DataFrame(cohort_rows)
 benchmarks = overall.get("benchmarks", {})
 
 
@@ -159,7 +170,7 @@ display_df = cohorts.assign(
     d1_vs_benchmark=lambda d: d["d1_vs_benchmark"].apply(lambda v: f"{v*100:+.1f}pp"),
     d7_vs_benchmark=lambda d: d["d7_vs_benchmark"].apply(lambda v: f"{v*100:+.1f}pp"),
     d30_vs_benchmark=lambda d: d["d30_vs_benchmark"].apply(lambda v: f"{v*100:+.1f}pp"),
-    avg_ltv=lambda d: d["avg_ltv"].apply(lambda v: f"${v:.2f}" if v is not None else "—"),
+    avg_ltv=lambda d: d["avg_ltv"].apply(lambda v: f"${v:.2f}" if pd.notna(v) else "—"),
 )
 st.dataframe(display_df, use_container_width=True, hide_index=True)
 

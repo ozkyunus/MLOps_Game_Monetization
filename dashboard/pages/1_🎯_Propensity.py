@@ -3,17 +3,15 @@ from __future__ import annotations
 
 import os
 
-import pandas as pd
 import plotly.graph_objects as go
 import requests
 import streamlit as st
+from _data import load_sample_users, require_db
 from _i18n import L, sidebar_lang_toggle
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-DB_URL  = os.getenv("SQLALCHEMY_DATABASE_URL")
 
 st.set_page_config(page_title="Propensity · pLTV", page_icon="🎯", layout="wide")
 sidebar_lang_toggle()
@@ -61,31 +59,17 @@ with st.expander(L("ℹ️ Bu sayfa ne yapıyor?", "ℹ️ What does this page d
 
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-@st.cache_resource
-def get_engine():
-    return create_engine(DB_URL)
-
-
-@st.cache_data(ttl=120)
-def load_sample_users() -> pd.DataFrame:
-    q = """
-        WITH ranked AS (
-            SELECT user_id, _cohort, _segment, target_ltv, target_is_payer,
-                   ROW_NUMBER() OVER (PARTITION BY _cohort, _segment ORDER BY user_id) AS rn
-            FROM user_features_d7
-        )
-        SELECT user_id, _cohort AS cohort, _segment AS segment,
-               target_ltv AS true_ltv, target_is_payer AS true_payer
-        FROM ranked WHERE rn <= 5
-        ORDER BY _cohort, _segment
-    """
-    return pd.read_sql(q, get_engine())
+engine = require_db()
+try:
+    users_df = load_sample_users(engine)
+except Exception as ex:
+    st.error(L("Veritabanı sorgusu başarısız", "Database query failed") + f": {ex}")
+    st.stop()
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header(L("Kullanıcı Seç", "Pick a user"))
-    users_df = load_sample_users()
     filter_cohort = st.selectbox(
         L("Cohort filtresi", "Filter by cohort"),
         ["(all)"] + sorted(users_df["cohort"].unique().tolist()),
@@ -167,12 +151,21 @@ if predict_btn or "last_pred" in st.session_state:
         try:
             r = requests.post(f"{API_URL}/propensity/predict", json=payload, timeout=10)
             r.raise_for_status()
-            st.session_state["last_pred"] = r.json()
+            st.session_state["last_pred"] = {
+                "inputs": {"user_id": picked_user},
+                "response": r.json(),
+            }
         except Exception as ex:
-            st.error(f"API call failed: {ex}")
+            st.error(L("API çağrısı başarısız", "API call failed") + f": {ex}")
             st.stop()
 
-    pred = st.session_state["last_pred"]
+    stored = st.session_state["last_pred"]
+    pred = stored["response"]
+    if stored["inputs"] != {"user_id": picked_user}:
+        st.warning(L(
+            "Gösterilen sonuç farklı bir seçim için üretildi — güncellemek için butona bas.",
+            "Shown result was generated for a different selection — click the button to refresh.",
+        ))
 
     st.subheader(L("Model Tahmini", "Model Output"))
     c1, c2, c3, c4 = st.columns(4)

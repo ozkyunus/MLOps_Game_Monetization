@@ -30,7 +30,7 @@ def sidebar_lang_toggle() -> None:
             format_func=lambda x: "🇹🇷 Türkçe" if x == "tr" else "🇬🇧 English",
             horizontal=True,
             index=0 if current == "tr" else 1,
-            key=f"lang_toggle_{st.session_state.get('_page_hash', 'default')}",
+            key="lang_toggle",
         )
         st.session_state["lang"] = picked
         st.divider()

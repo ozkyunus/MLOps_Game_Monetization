@@ -64,10 +64,15 @@ def fetch_roi() -> dict:
     return r.json()
 
 
+def fmt_or_dash(v, pattern: str) -> str:
+    """Format a numeric value, or render an em-dash when it is None (e.g. zero spend)."""
+    return pattern.format(v) if v is not None else "—"
+
+
 try:
     data = fetch_roi()
 except Exception as ex:
-    st.error(f"API call failed: {ex}")
+    st.error(L("API çağrısı başarısız", "API call failed") + f": {ex}")
     st.stop()
 
 
@@ -82,8 +87,8 @@ o1.metric("Installs",                                f"{overall['installs']:,}")
 o2.metric(L("Ödeyici", "Payers"),                    f"{overall['payers']:,}")
 o3.metric(L("Toplam Harcama", "Total Spend"),        f"${overall['spend_usd']:,.0f}")
 o4.metric(L("Gözlemlenen Gelir", "Observed Revenue"),f"${overall['revenue_observed_usd']:,.0f}")
-o5.metric("Blended ROAS", f"{overall['blended_roas_observed']:.2f}",
-          f"CPI ${overall['blended_cpi']:.2f}")
+o5.metric("Blended ROAS", fmt_or_dash(overall["blended_roas_observed"], "{:.2f}"),
+          "CPI " + fmt_or_dash(overall["blended_cpi"], "${:.2f}"))
 
 
 st.divider()
@@ -94,13 +99,13 @@ st.dataframe(
     by_channel.assign(
         spend_usd=lambda d: d["spend_usd"].apply(lambda v: f"${v:,.0f}"),
         revenue_observed_usd=lambda d: d["revenue_observed_usd"].apply(lambda v: f"${v:,.0f}"),
-        cpi_usd=lambda d: d["cpi_usd"].apply(lambda v: f"${v:.2f}" if v is not None else "—"),
-        avg_ltv_payers=lambda d: d["avg_ltv_payers"].apply(lambda v: f"${v:.2f}" if v is not None else "—"),
+        cpi_usd=lambda d: d["cpi_usd"].apply(lambda v: f"${v:.2f}" if pd.notna(v) else "—"),
+        avg_ltv_payers=lambda d: d["avg_ltv_payers"].apply(lambda v: f"${v:.2f}" if pd.notna(v) else "—"),
         conversion_rate=lambda d: d["conversion_rate"].apply(lambda v: f"{v*100:.2f}%"),
-        arpu_usd=lambda d: d["arpu_usd"].apply(lambda v: f"${v:.3f}" if v is not None else "—"),
-        roas_observed=lambda d: d["roas_observed"].apply(lambda v: f"{v:.2f}" if v is not None else "—"),
+        arpu_usd=lambda d: d["arpu_usd"].apply(lambda v: f"${v:.3f}" if pd.notna(v) else "—"),
+        roas_observed=lambda d: d["roas_observed"].apply(lambda v: f"{v:.2f}" if pd.notna(v) else "—"),
         payback_days_estimate=lambda d: d["payback_days_estimate"].apply(
-            lambda v: f"{v:.1f}" if v is not None else "—"),
+            lambda v: f"{v:.1f}" if pd.notna(v) else "—"),
     ),
     use_container_width=True, hide_index=True,
 )

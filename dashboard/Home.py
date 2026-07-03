@@ -12,15 +12,20 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+from _data import get_engine
 from _i18n import L, sidebar_lang_toggle
 from dotenv import load_dotenv
-from sqlalchemy import create_engine, text
+from sqlalchemy import text
 
 # ── Setup ────────────────────────────────────────────────────────────────────
 load_dotenv()
 API_URL    = os.getenv("API_URL", "http://localhost:8000")
-DB_URL     = os.getenv("SQLALCHEMY_DATABASE_URL")
 MLFLOW_URL = os.getenv("MLFLOW_TRACKING_URI", "http://localhost:5001")
+
+# Browser-facing URLs for link buttons (inside Docker the container-internal
+# hostnames are not reachable from the user's browser).
+PUBLIC_API_URL    = os.getenv("PUBLIC_API_URL", API_URL)
+PUBLIC_MLFLOW_URL = os.getenv("PUBLIC_MLFLOW_URL", MLFLOW_URL)
 
 st.set_page_config(
     page_title="Monetization Intelligence Platform",
@@ -33,11 +38,6 @@ sidebar_lang_toggle()
 
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
-
-@st.cache_resource
-def get_engine():
-    return create_engine(DB_URL)
-
 
 @st.cache_data(ttl=60)
 def check_api_health() -> dict:
@@ -185,8 +185,8 @@ with st.sidebar:
     st.header(L("Adresler", "Endpoints"))
     st.code(f"API    → {API_URL}", language="text")
     st.code(f"MLflow → {MLFLOW_URL}", language="text")
-    st.link_button("FastAPI Docs (Swagger)", f"{API_URL}/docs")
-    st.link_button("MLflow UI", MLFLOW_URL)
+    st.link_button("FastAPI Docs (Swagger)", f"{PUBLIC_API_URL}/docs")
+    st.link_button("MLflow UI", PUBLIC_MLFLOW_URL)
 
     st.divider()
     st.caption(L(
@@ -197,6 +197,12 @@ with st.sidebar:
 
 # ── Overview KPIs ────────────────────────────────────────────────────────────
 st.subheader(L("Genel İstatistikler", "Platform Overview"))
+if get_engine() is None:
+    st.error(L(
+        "Veritabanı yapılandırılmamış — .env dosyasında SQLALCHEMY_DATABASE_URL ayarla.",
+        "Database not configured — set SQLALCHEMY_DATABASE_URL in .env.",
+    ))
+    st.stop()
 try:
     stats = load_platform_stats()
     c1, c2, c3, c4, c5 = st.columns(5)
@@ -214,7 +220,7 @@ try:
               help=L("Decision Engine tarafından verilen kararlar",
                      "Decisions logged by the Decision Engine"))
 except Exception as ex:
-    st.error(f"Database unreachable: {ex}")
+    st.error(L("Veritabanına ulaşılamıyor", "Database unreachable") + f": {ex}")
     st.stop()
 
 
@@ -280,7 +286,7 @@ st.caption(L(
 ))
 models_df = load_registered_models()
 if "error" in models_df.columns:
-    st.warning(f"MLflow query failed: {models_df.iloc[0]['error']}")
+    st.warning(L("MLflow sorgusu başarısız", "MLflow query failed") + f": {models_df.iloc[0]['error']}")
 else:
     st.dataframe(models_df, use_container_width=True, hide_index=True)
     st.caption(L(

@@ -73,6 +73,8 @@ def fetch_registered_models() -> pd.DataFrame:
                 "run_id":  v.get("run_id", ""),
                 "source":  v.get("source", "")[:70],
             })
+    if not rows:
+        return pd.DataFrame()
     return pd.DataFrame(rows).sort_values(["model", "version"], ascending=[True, False])
 
 
@@ -80,7 +82,7 @@ def fetch_registered_models() -> pd.DataFrame:
 def fetch_experiments() -> list[dict]:
     r = requests.get(
         f"{MLFLOW_URL}/api/2.0/mlflow/experiments/search",
-        json={"max_results": 20}, timeout=5,
+        params={"max_results": 20}, timeout=5,
     )
     r.raise_for_status()
     return r.json().get("experiments", [])
@@ -118,7 +120,7 @@ def fetch_runs_for_experiment(exp_id: str, max_results: int = 20) -> pd.DataFram
 try:
     models_df = fetch_registered_models()
 except Exception as ex:
-    st.error(f"MLflow unreachable at {MLFLOW_URL}: {ex}")
+    st.error(L("MLflow'a ulaşılamıyor", "MLflow unreachable") + f" ({MLFLOW_URL}): {ex}")
     st.stop()
 
 
@@ -127,7 +129,13 @@ st.caption(L(
     "Her train'de yeni bir version satırı oluşur. Serving en yeni versiyonu kullanır.",
     "A new version row appears on each train. Serving uses the newest.",
 ))
-st.dataframe(models_df, use_container_width=True, hide_index=True)
+if models_df.empty:
+    st.info(L(
+        "Henüz kayıtlı model yok — önce eğitim çalıştır.",
+        "No registered models yet — run training first.",
+    ))
+else:
+    st.dataframe(models_df, use_container_width=True, hide_index=True)
 
 
 st.divider()
@@ -138,16 +146,19 @@ st.caption(L(
 ))
 
 exps = fetch_experiments()
-if not exps:
-    st.info(L("Experiment bulunamadı.", "No experiments found."))
+exp_names = [e["name"] for e in exps if e["name"] != "Default"]
+if not exp_names:
+    st.info(L(
+        "Experiment bulunamadı — önce eğitim çalıştır.",
+        "No experiments found — run training first.",
+    ))
 else:
-    exp_names = [e["name"] for e in exps if e["name"] != "Default"]
     picked_exp = st.selectbox("Experiment", exp_names)
     exp_id = next(e["experiment_id"] for e in exps if e["name"] == picked_exp)
 
     runs = fetch_runs_for_experiment(exp_id)
     if runs.empty:
-        st.info(f"No runs in `{picked_exp}`.")
+        st.info(L(f"`{picked_exp}` içinde run yok.", f"No runs in `{picked_exp}`."))
     else:
         st.dataframe(
             runs.assign(
@@ -194,7 +205,7 @@ st.caption(L(
     "This chart is our honesty artifact.",
 ))
 
-calib_path = Path("saved_models/calibration_curve.png")
+calib_path = Path(__file__).resolve().parents[2] / "saved_models" / "calibration_curve.png"
 if calib_path.exists():
     st.image(
         str(calib_path),
@@ -202,7 +213,7 @@ if calib_path.exists():
             "Diyagonal = mükemmel kalibrasyon.",
             "Diagonal = perfect calibration.",
         ),
-        use_column_width=True,
+        use_container_width=True,
     )
 else:
     st.warning(L(

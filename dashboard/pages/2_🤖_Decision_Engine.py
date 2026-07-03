@@ -7,13 +7,12 @@ import pandas as pd
 import plotly.express as px
 import requests
 import streamlit as st
+from _data import load_sample_users, require_db
 from _i18n import L, sidebar_lang_toggle
 from dotenv import load_dotenv
-from sqlalchemy import create_engine
 
 load_dotenv()
 API_URL = os.getenv("API_URL", "http://localhost:8000")
-DB_URL  = os.getenv("SQLALCHEMY_DATABASE_URL")
 
 st.set_page_config(page_title="Decision Engine", page_icon="🤖", layout="wide")
 sidebar_lang_toggle()
@@ -65,29 +64,17 @@ with st.expander(L("ℹ️ Bu sayfa ne yapıyor?", "ℹ️ What does this page d
 
 
 # ── Data ─────────────────────────────────────────────────────────────────────
-@st.cache_resource
-def get_engine():
-    return create_engine(DB_URL)
-
-
-@st.cache_data(ttl=120)
-def load_sample_users() -> pd.DataFrame:
-    q = """
-        WITH ranked AS (
-            SELECT user_id, _cohort, _segment,
-                   ROW_NUMBER() OVER (PARTITION BY _cohort, _segment ORDER BY user_id) AS rn
-            FROM user_features_d7
-        )
-        SELECT user_id, _cohort AS cohort, _segment AS segment
-        FROM ranked WHERE rn <= 5 ORDER BY _cohort, _segment
-    """
-    return pd.read_sql(q, get_engine())
+engine = require_db()
+try:
+    users_df = load_sample_users(engine)
+except Exception as ex:
+    st.error(L("Veritabanı sorgusu başarısız", "Database query failed") + f": {ex}")
+    st.stop()
 
 
 # ── Sidebar ──────────────────────────────────────────────────────────────────
 with st.sidebar:
     st.header(L("Girdiler", "Inputs"))
-    users_df = load_sample_users()
     picked = st.selectbox(
         L("Kullanıcı", "User"),
         users_df["user_id"].tolist(),
@@ -123,12 +110,21 @@ if decide_btn:
             timeout=10,
         )
         r.raise_for_status()
-        st.session_state["last_decision"] = r.json()
+        st.session_state["last_decision"] = {
+            "inputs": {"user_id": picked, "context": context},
+            "response": r.json(),
+        }
     except Exception as ex:
-        st.error(f"API call failed: {ex}")
+        st.error(L("API çağrısı başarısız", "API call failed") + f": {ex}")
         st.stop()
 
-d = st.session_state["last_decision"]
+stored = st.session_state["last_decision"]
+d = stored["response"]
+if stored["inputs"] != {"user_id": picked, "context": context}:
+    st.warning(L(
+        "Gösterilen sonuç farklı bir seçim için üretildi — güncellemek için butona bas.",
+        "Shown result was generated for a different selection — click the button to refresh.",
+    ))
 
 action = d["action"]
 action_style = {

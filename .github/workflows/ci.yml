@@ -5,6 +5,8 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:   # manual runs — required for the docker-build job's
+                       # dispatch path to actually be reachable
 
 # Cancel outdated runs so a rapid succession of pushes doesn't burn CI minutes.
 concurrency:
@@ -14,6 +16,8 @@ concurrency:
 jobs:
 
   # ── Lint ─────────────────────────────────────────────────────────────────
+  # Runs ruff FROM THE LOCKFILE (uv run), not a floating uvx pin — CI and
+  # local dev literally execute the same ruff version, no rule drift.
   lint:
     name: Lint (ruff)
     runs-on: ubuntu-latest
@@ -25,15 +29,22 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           version: "0.5.11"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --group dev
 
       - name: Ruff check
-        run: uvx ruff@0.14 check src/ scripts/ dashboard/
+        run: uv run ruff check src/ scripts/ dashboard/ tests/
 
-  # ── Smoke tests ──────────────────────────────────────────────────────────
-  # Only runs when the tests directory has content. Otherwise skipped
-  # cleanly — this job is a placeholder that becomes meaningful in P1-7.
+  # ── Tests ────────────────────────────────────────────────────────────────
+  # Unit tests always run; integration tests auto-skip without Postgres +
+  # model artifacts (see tests/conftest.py).
   tests:
-    name: Pytest smoke tests
+    name: Pytest
     runs-on: ubuntu-latest
     needs: lint
     steps:
@@ -44,33 +55,20 @@ jobs:
         uses: astral-sh/setup-uv@v3
         with:
           version: "0.5.11"
+          enable-cache: true
 
       - name: Set up Python
         run: uv python install 3.12
 
-      - name: Sync dependencies (including dev group)
-        run: uv sync --group dev
-
-      - name: Check if there are tests to run
-        id: check_tests
-        run: |
-          if find tests -type f -name 'test_*.py' 2>/dev/null | grep -q .; then
-            echo "has_tests=true" >> $GITHUB_OUTPUT
-          else
-            echo "has_tests=false" >> $GITHUB_OUTPUT
-          fi
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --group dev
 
       - name: Pytest
-        if: steps.check_tests.outputs.has_tests == 'true'
         run: uv run pytest -q
-
-      - name: No tests yet
-        if: steps.check_tests.outputs.has_tests == 'false'
-        run: echo "tests/ has no test_*.py files yet — skipping pytest."
 
   # ── Docker build (verifies the Dockerfile still produces a healthy image) ─
   # Skipped on plain pushes to avoid burning ~10min every commit — runs on
-  # PRs and on explicit workflow_dispatch.
+  # PRs and on manual workflow_dispatch.
   docker-build:
     name: Docker build
     runs-on: ubuntu-latest
