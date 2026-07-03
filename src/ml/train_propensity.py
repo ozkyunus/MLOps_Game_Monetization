@@ -69,8 +69,14 @@ mlflow.set_experiment(EXPERIMENT_NAME)
 engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
 
 
+# v3 feature set — OBSERVABLE signals only.
+# `_engagement_potential` (and its qcut twin `engagement_bucket`) are the
+# synthetic generator's LATENT variable: purchases are literally sampled from
+# sigmoid(engagement - threshold). A model consuming them learns the
+# generator, not player behaviour — and no production telemetry pipeline can
+# ever emit that column. Sessions/ad-views are the observable consequences
+# of engagement, which is exactly what real telemetry would give us.
 NUMERIC_FEATURES = [
-    "_engagement_potential",
     "_sessions_d7",
     "_ad_views_d7",
     "ads_per_session",
@@ -80,7 +86,7 @@ NUMERIC_FEATURES = [
     "install_is_weekend",
 ]
 CATEGORICAL_FEATURES = [
-    "country", "platform", "channel", "engagement_bucket", "channel_platform",
+    "country", "platform", "channel", "channel_platform",
 ]
 DEMO_ONLY_FEATURES = ["country", "platform", "channel", "install_dow",
                        "install_is_weekend"]

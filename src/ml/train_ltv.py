@@ -60,8 +60,10 @@ mlflow.set_experiment(EXPERIMENT_NAME)
 engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
 
 
+# v3 feature set — observable signals only (see train_propensity.py for the
+# full rationale: `_engagement_potential`/`engagement_bucket` are the
+# generator's latent variable, not telemetry any production system could emit).
 NUMERIC_FEATURES = [
-    "_engagement_potential",
     "_sessions_d7",
     "_ad_views_d7",
     "ads_per_session",
@@ -71,7 +73,7 @@ NUMERIC_FEATURES = [
     "install_is_weekend",
 ]
 CATEGORICAL_FEATURES = [
-    "country", "platform", "channel", "engagement_bucket", "channel_platform",
+    "country", "platform", "channel", "channel_platform",
 ]
 TARGET = "target_ltv"
 
