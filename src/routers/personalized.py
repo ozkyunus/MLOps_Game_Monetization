@@ -17,20 +17,21 @@ demo deterministic.
 """
 from __future__ import annotations
 
+import logging
 import os
 from functools import lru_cache
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from pydantic import BaseModel, Field
+from sqlmodel import Session
 
+from src.database import engine as db_engine
 from src.ml.inference import predict_pltv
-from src.routers.decide import (
-    AD_REVENUE_PER_IMPRESSION,
-    CONTEXT_MULTIPLIERS,
-    IAP_MIN_P_PAYER,
-    REWARDED_COMPLETION_RATE,
-    match_iap_tier,
-)
+from src.models import AgentAction, DecisionRequest
+from src.routers.decide import compute_expected_revenues
+from src.routers.propensity import value_segment
+
+logger = logging.getLogger("personalized")
 
 router = APIRouter(prefix="/personalized", tags=["personalized"])
 
@@ -162,53 +163,19 @@ def _fallback_copy(segment: str, action: str, context: str) -> OfferCopy:
     return OfferCopy(title="Special Offer", body="Don't miss out.", cta="Tap Here")
 
 
-# ── Inline copy of decision logic (avoid HTTP self-call) ─────────────────────
-
-def _value_segment(pltv: float) -> str:
-    if pltv >= 5.0:  return "whale_candidate"
-    if pltv >= 2.0:  return "dolphin_candidate"
-    if pltv >= 0.5:  return "minnow_candidate"
-    return "low_value"
-
+# ── Decision math is SHARED with /decide (compute_expected_revenues) ─────────
+# v2 kept a hand-synced copy of the EV formulas + a copy-pasted value_segment
+# here; both are now imported so the two surfaces cannot drift apart.
 
 def _decide_action(pred: dict, context: str) -> dict:
     raw = pred["raw_features"].iloc[0]
     ad_views_d7 = int(raw["_ad_views_d7"])
-    ad_fatigue_penalty = 0.5 if ad_views_d7 > 30 else 1.0
-
-    mult = CONTEXT_MULTIPLIERS[context]
-    iap_tier = match_iap_tier(pred["pLTV"])
-
-    # Mirror the decide router's IAP eligibility rule so this offer copy is
-    # consistent with the primary decision endpoint.
-    iap_eligible = (
-        not pred.get("gate_applied", False)
-        and pred["p_payer"] >= IAP_MIN_P_PAYER
-    )
-
-    er = {
-        "SHOW_IAP": (
-            pred["p_payer"] * iap_tier["price"] * mult["SHOW_IAP"]
-            if iap_eligible else 0.0
-        ),
-        "SHOW_AD_REWARDED": (
-            AD_REVENUE_PER_IMPRESSION["SHOW_AD_REWARDED"]
-            * REWARDED_COMPLETION_RATE
-            * mult["SHOW_AD_REWARDED"]
-            * ad_fatigue_penalty
-        ),
-        "SHOW_AD_INTERSTITIAL": (
-            AD_REVENUE_PER_IMPRESSION["SHOW_AD_INTERSTITIAL"]
-            * mult["SHOW_AD_INTERSTITIAL"]
-            * ad_fatigue_penalty
-        ),
-        "SKIP": 0.0,
+    d = compute_expected_revenues(pred, context, ad_views_d7)
+    return {
+        "action": d["best"],
+        "expected_revenue": d["er"][d["best"]],
+        "offer_tier": d["iap_tier"],
     }
-    if max(v for k, v in er.items() if k != "SKIP") < 0.0005:
-        best = "SKIP"
-    else:
-        best = max(er, key=er.get)
-    return {"action": best, "expected_revenue": er[best], "offer_tier": iap_tier}
 
 
 # ── LLM copy generator with cache ────────────────────────────────────────────
@@ -218,16 +185,21 @@ _COPY_CACHE: dict[tuple, OfferCopy] = {}
 
 def _generate_copy(segment: str, action: str, context: str, offer_tier: dict,
                    pltv: float) -> tuple[OfferCopy, str]:
-    """Returns (copy, source) where source ∈ {'llm', 'fallback', 'cache'}."""
+    """Returns (copy, source) where source ∈ {'llm', 'fallback', 'cache'}.
+
+    Only REAL LLM results are cached. v2 also cached fallbacks, so a single
+    transient Gemini error (e.g. a 429 at cold start) poisoned the cache for
+    that (segment, action, context) key permanently — every later request
+    returned the fallback labelled "cache" and the LLM was never retried.
+    """
     cache_key = (segment, action, context)
     if cache_key in _COPY_CACHE:
         return _COPY_CACHE[cache_key], "cache"
 
     chain = _llm_chain()
     if chain is None or action in ("SHOW_AD_INTERSTITIAL", "SKIP"):
-        copy = _fallback_copy(segment, action, context)
-        _COPY_CACHE[cache_key] = copy
-        return copy, "fallback"
+        # Deterministic template — cheap to recompute, no reason to cache.
+        return _fallback_copy(segment, action, context), "fallback"
 
     try:
         copy = chain.invoke({
@@ -241,31 +213,44 @@ def _generate_copy(segment: str, action: str, context: str, offer_tier: dict,
         _COPY_CACHE[cache_key] = copy
         return copy, "llm"
     except Exception:
-        copy = _fallback_copy(segment, action, context)
-        _COPY_CACHE[cache_key] = copy
-        return copy, "fallback"
+        logger.exception(
+            "LLM copy generation failed for %s — serving fallback (NOT cached)",
+            cache_key,
+        )
+        return _fallback_copy(segment, action, context), "fallback"
 
 
 # ── Endpoint ─────────────────────────────────────────────────────────────────
 
 @router.post("/offer")
-def personalized_offer(payload: dict):
-    user_id = payload.get("user_id")
-    context = payload.get("context", "app_open")
-    if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
-    if context not in CONTEXT_MULTIPLIERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"context must be one of {list(CONTEXT_MULTIPLIERS)}",
-        )
+def personalized_offer(payload: DecisionRequest):
+    user_id = payload.user_id
+    context = payload.context
 
     pred = predict_pltv(user_id)
-    segment = _value_segment(pred["pLTV"])
+    segment = value_segment(pred["pLTV"])
     decision = _decide_action(pred, context)
     copy, source = _generate_copy(
         segment, decision["action"], context, decision["offer_tier"], pred["pLTV"]
     )
+
+    # Audit log — this surface actually RENDERS an offer to the player, so it
+    # must land in AgentAction for replay/attribution just like /decide does.
+    # (v2 logged only /decide; offers served here were invisible to analysis.)
+    with Session(db_engine) as session:
+        session.add(AgentAction(
+            player_id=user_id,
+            action_taken=decision["action"],
+            offer_shown=(
+                decision["offer_tier"]["name"]
+                if decision["action"] == "SHOW_IAP" else None
+            ),
+            outcome=None,
+            revenue_generated=None,
+            model_version=pred["model_version"],
+            ab_test_group=None,
+        ))
+        session.commit()
 
     return {
         "user_id":          user_id,

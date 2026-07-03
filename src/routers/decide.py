@@ -17,20 +17,19 @@ Context multipliers (industry intuition):
   - "after_loss"     : REWARDED +30%  (motivated to continue, e.g. extra life)
   - "app_open"       : balanced
 
-Ad fatigue penalty: if ad_views_d7 > 30, ads get a 0.5x penalty.
+Ad fatigue: graduated penalty (>30 views: 0.5x, >60: 0.15x) + an EV floor
+so heavily-fatigued non-IAP users get SKIP instead of another ad.
 
 Output is logged to AgentAction so we can later replay + A/B compare.
 """
 from __future__ import annotations
 
-from typing import Literal
-
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlmodel import Session
 
 from src.database import engine as db_engine
 from src.ml.inference import predict_pltv
-from src.models import AgentAction
+from src.models import AgentAction, DecisionRequest
 from src.synthetic import benchmarks as B
 
 router = APIRouter(prefix="/decide", tags=["decide"])
@@ -64,8 +63,75 @@ CONTEXT_MULTIPLIERS = {
 # decision from over-firing on marginal cases.
 IAP_MIN_P_PAYER = 0.25
 
-ContextStr = Literal["level_complete", "after_loss", "app_open"]
+# Graduated ad-fatigue penalty. v2 had a single 0.5× tier and a SKIP floor of
+# 0.0005 that was mathematically unreachable (the worst-case interstitial EV
+# was 0.0048 — the "skip to protect retention" branch was dead code).
+# With a 0.15× heavy tier and a 0.0025 floor, SKIP genuinely fires for
+# heavily-fatigued non-IAP users outside the after_loss context:
+#   rewarded @app_open, >60 ads: 0.018 × 0.85 × 1.00 × 0.15 = 0.0023 < floor → SKIP
+#   rewarded @after_loss, >60:   0.018 × 0.85 × 1.30 × 0.15 = 0.0030 > floor → show
+AD_FATIGUE_TIERS = [
+    (60, 0.15),   # heavy fatigue — ads nearly worthless, retention risk high
+    (30, 0.50),   # moderate fatigue
+]
+SKIP_EV_FLOOR = 0.0025
 
+
+def ad_fatigue_penalty_for(ad_views_d7: int) -> float:
+    for threshold, penalty in AD_FATIGUE_TIERS:
+        if ad_views_d7 > threshold:
+            return penalty
+    return 1.0
+
+
+def compute_expected_revenues(pred: dict, context: str, ad_views_d7: int) -> dict:
+    """Shared decision math — the ONLY place expected revenue is computed.
+
+    Used by both /decide/action and /personalized/offer so the two surfaces
+    can never drift apart (they were hand-synced copies before).
+    """
+    fatigue = ad_fatigue_penalty_for(ad_views_d7)
+    mult = CONTEXT_MULTIPLIERS[context]
+    iap_tier = match_iap_tier(pred["pLTV"])
+
+    # IAP eligibility: skip IAP if (a) the pLTV gate fired ("we don't trust
+    # this user is a payer") or (b) p_payer is below the IAP-specific floor.
+    iap_eligible = (
+        not pred.get("gate_applied", False)
+        and pred["p_payer"] >= IAP_MIN_P_PAYER
+    )
+
+    er = {
+        "SHOW_IAP": (
+            pred["p_payer"] * iap_tier["price"] * mult["SHOW_IAP"]
+            if iap_eligible else 0.0
+        ),
+        "SHOW_AD_REWARDED": (
+            AD_REVENUE_PER_IMPRESSION["SHOW_AD_REWARDED"]
+            * REWARDED_COMPLETION_RATE
+            * mult["SHOW_AD_REWARDED"]
+            * fatigue
+        ),
+        "SHOW_AD_INTERSTITIAL": (
+            AD_REVENUE_PER_IMPRESSION["SHOW_AD_INTERSTITIAL"]
+            * mult["SHOW_AD_INTERSTITIAL"]
+            * fatigue
+        ),
+        "SKIP": 0.0,
+    }
+
+    if max(v for k, v in er.items() if k != "SKIP") < SKIP_EV_FLOOR:
+        best = "SKIP"
+    else:
+        best = max(er, key=er.get)
+
+    return {
+        "er": er,
+        "best": best,
+        "iap_tier": iap_tier,
+        "iap_eligible": iap_eligible,
+        "ad_fatigue_penalty": fatigue,
+    }
 
 def match_iap_tier(pltv: float) -> dict:
     """Pick the highest-price tier the user can sustain by pLTV."""
@@ -76,60 +142,20 @@ def match_iap_tier(pltv: float) -> dict:
 
 
 @router.post("/action")
-def decide_action(payload: dict):
-    user_id = payload.get("user_id")
-    context = payload.get("context", "app_open")
-    if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
-    if context not in CONTEXT_MULTIPLIERS:
-        raise HTTPException(
-            status_code=422,
-            detail=f"context must be one of {list(CONTEXT_MULTIPLIERS)}",
-        )
+def decide_action(payload: DecisionRequest):
+    user_id = payload.user_id
+    context = payload.context
 
     pred = predict_pltv(user_id)
     raw = pred["raw_features"].iloc[0]
     ad_views_d7 = int(raw["_ad_views_d7"])
-    ad_fatigue_penalty = 0.5 if ad_views_d7 > 30 else 1.0
 
-    mult = CONTEXT_MULTIPLIERS[context]
-    iap_tier = match_iap_tier(pred["pLTV"])
-
-    # ── IAP eligibility check ────────────────────────────────────────────────
-    # Skip IAP if either: (a) the pLTV gate was applied ("we don't trust this
-    # user is a payer") OR (b) p_payer is below the IAP-specific threshold.
-    # This aligns the IAP decision with the gate mechanism upstream.
-    iap_eligible = (
-        not pred.get("gate_applied", False)
-        and pred["p_payer"] >= IAP_MIN_P_PAYER
-    )
-
-    # Expected revenue per action
-    er = {
-        "SHOW_IAP": (
-            pred["p_payer"] * iap_tier["price"] * mult["SHOW_IAP"]
-            if iap_eligible else 0.0
-        ),
-        "SHOW_AD_REWARDED": (
-            AD_REVENUE_PER_IMPRESSION["SHOW_AD_REWARDED"]
-            * REWARDED_COMPLETION_RATE
-            * mult["SHOW_AD_REWARDED"]
-            * ad_fatigue_penalty
-        ),
-        "SHOW_AD_INTERSTITIAL": (
-            AD_REVENUE_PER_IMPRESSION["SHOW_AD_INTERSTITIAL"]
-            * mult["SHOW_AD_INTERSTITIAL"]
-            * ad_fatigue_penalty
-        ),
-        "SKIP": 0.0,
-    }
-
-    # SKIP wins only when all paid actions are below a floor — protect retention
-    # rather than annoy a fatigued user with no upside.
-    if max(v for k, v in er.items() if k != "SKIP") < 0.0005:
-        best_action = "SKIP"
-    else:
-        best_action = max(er, key=er.get)
+    decision = compute_expected_revenues(pred, context, ad_views_d7)
+    er                 = decision["er"]
+    best_action        = decision["best"]
+    iap_tier           = decision["iap_tier"]
+    iap_eligible       = decision["iap_eligible"]
+    ad_fatigue_penalty = decision["ad_fatigue_penalty"]
 
     # Build reasoning string
     if best_action == "SHOW_IAP":
@@ -142,7 +168,7 @@ def decide_action(payload: dict):
         reasoning = (
             f"{pltv_qualifier} pLTV (${pred['pLTV']:.2f}) with p_payer={pred['p_payer']:.2f} "
             f"≥ IAP threshold {IAP_MIN_P_PAYER}; picks {iap_tier['name']} at "
-            f"${iap_tier['price']} (expected {pred['p_payer']*iap_tier['price']:.3f})."
+            f"${iap_tier['price']} (expected {er['SHOW_IAP']:.3f})."
         )
         offer = iap_tier["name"]
     elif best_action == "SHOW_AD_REWARDED":

@@ -41,6 +41,12 @@ class _LazyEngine:
 engine = _LazyEngine()
 
 
+def get_engine():
+    """Public accessor for the real (materialised) SQLAlchemy engine.
+    Use inside request handlers / scripts; never at module import time."""
+    return engine._materialise()
+
+
 def create_db_and_tables():
     SQLModel.metadata.create_all(engine._materialise())
 

@@ -11,6 +11,7 @@ Tables:
 """
 
 from datetime import UTC, datetime
+from typing import Literal
 
 from sqlmodel import Field, SQLModel, text
 
@@ -99,32 +100,19 @@ class PredictionLog(SQLModel, table=True):
     )
 
 
+# Request schemas — wired into the routers so FastAPI validates payloads
+# (v2 accepted raw dicts: {"user_id": 123} reached the SQL layer and 500'd,
+# gate_threshold=-1 silently disabled gating, and Swagger showed no schema).
+
 class PropensityRequest(SQLModel):
-    player_id: str
-
-
-class PropensityResponse(SQLModel):
-    player_id: str
-    purchase_prob_30d: float
-    expected_amount: float | None = None
-    expected_revenue: float
-    segment: str
-    model_version: str
+    user_id: str
+    # None → cohort-aware default gate (real=0.10, synth=0.20).
+    gate_threshold: float | None = Field(default=None, ge=0.0, le=1.0)
 
 
 class DecisionRequest(SQLModel):
-    player_id: str
-    context: str | None = None  # "level_complete" / "app_open" / etc.
-
-
-class DecisionResponse(SQLModel):
-    player_id: str
-    action: str  # SHOW_IAP / SHOW_AD_REWARDED / SHOW_AD_INTERSTITIAL / SKIP
-    offer: str | None = None
-    expected_revenue: float
-    reasoning: str
-    alternatives: list[dict]
-    model_version: str
+    user_id: str
+    context: Literal["level_complete", "after_loss", "app_open"] = "app_open"
 
 
 # -------------------- Model registry mirror --------------------

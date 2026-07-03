@@ -24,15 +24,15 @@ DISCLAIMER (honest naming, v2):
 """
 from __future__ import annotations
 
-import os
-
 import pandas as pd
 from fastapi import APIRouter
-from sqlalchemy import create_engine
+
+from src.database import get_engine
 
 router = APIRouter(prefix="/channel", tags=["channel"])
 
-_engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+# Lazy shared engine — module import must not require a live database
+# (v2 created a private pool here, breaking `import src.main` without env).
 
 
 def _safe_div(num, denom):
@@ -58,11 +58,11 @@ def channel_roi():
         WHERE channel IS NOT NULL
         GROUP BY channel
         """,
-        _engine,
+        get_engine(),
     )
     spend = pd.read_sql(
         "SELECT ad_platform AS channel, SUM(ad_spend) AS spend FROM raw_ad_spend GROUP BY ad_platform",
-        _engine,
+        get_engine(),
     )
 
     df = users.merge(spend, on="channel", how="left")

@@ -18,17 +18,16 @@ distribution + the benchmark targets in benchmarks.py.
 """
 from __future__ import annotations
 
-import os
-
 import pandas as pd
 from fastapi import APIRouter, HTTPException, Query
-from sqlalchemy import create_engine
 
+from src.database import get_engine
 from src.synthetic import benchmarks as B
 
 router = APIRouter(prefix="/cohort", tags=["cohort"])
 
-_engine = create_engine(os.getenv("SQLALCHEMY_DATABASE_URL"))
+# Lazy shared engine — module import must not require a live database
+# (v2 created a private pool here, breaking `import src.main` without env).
 
 ALLOWED_DIMS = {"channel", "country", "platform"}
 
@@ -70,7 +69,7 @@ def cohort_retention(
         HAVING COUNT(*) >= {min_installs}
         ORDER BY installs DESC
     """
-    df = pd.read_sql(q, _engine)
+    df = pd.read_sql(q, get_engine())
 
     bench = B.RETENTION_TARGETS  # {'D1': 0.34, 'D7': 0.17, 'D30': 0.10}
 
@@ -101,7 +100,7 @@ def cohort_retention(
           AVG(target_is_payer::float)                                       AS d30
         FROM user_features_d7
     """
-    o = pd.read_sql(overall_q, _engine).iloc[0]
+    o = pd.read_sql(overall_q, get_engine()).iloc[0]
     overall = {
         "installs":           int(o["installs"]),
         "d1_retention":       _round_or_none(o["d1"]),

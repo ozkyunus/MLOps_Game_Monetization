@@ -13,12 +13,12 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter
 from sqlmodel import Session
 
 from src.database import engine as db_engine
 from src.ml.inference import load_models, predict_pltv
-from src.models import PredictionLog
+from src.models import PredictionLog, PropensityRequest
 
 router = APIRouter(prefix="/propensity", tags=["propensity"])
 
@@ -31,16 +31,12 @@ def value_segment(pltv: float) -> str:
 
 
 @router.post("/predict")
-def predict(payload: dict):
-    user_id = payload.get("user_id")
-    # If client doesn't pass gate_threshold, let inference pick the cohort-
-    # aware default (real=0.10, synth=0.20). Only override if explicitly given.
-    raw_gate = payload.get("gate_threshold")
-    gate = float(raw_gate) if raw_gate is not None else None
-    if not user_id:
-        raise HTTPException(status_code=422, detail="user_id required")
-
-    result = predict_pltv(user_id, gate_threshold=gate)
+def predict(payload: PropensityRequest):
+    # gate_threshold None → inference picks the cohort-aware default
+    # (real=0.10, synth=0.20). Pydantic bounds it to [0, 1] when given —
+    # v2 accepted gate_threshold=-1, which silently disabled gating.
+    user_id = payload.user_id
+    result = predict_pltv(user_id, gate_threshold=payload.gate_threshold)
     raw = result["raw_features"]
     segment = value_segment(result["pLTV"])
 
