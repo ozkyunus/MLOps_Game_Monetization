@@ -12,9 +12,24 @@ def test_load_models_returns_both_towers(needs_models):
     models = load_models()
     assert "propensity" in models
     assert "ltv" in models
-    for k in ("model", "encoders", "features"):
+    # v2.2 bundle contract: "model" is a full sklearn Pipeline (prep + estimator),
+    # "features" are RAW input columns, "split" carries held-out membership.
+    for k in ("model", "features", "split"):
         assert k in models["propensity"], f"propensity bundle missing '{k}'"
         assert k in models["ltv"],       f"ltv bundle missing '{k}'"
+
+
+def test_bundle_model_is_pipeline_with_preprocessing(needs_models):
+    """All preprocessing must live INSIDE the served artifact — if the first
+    pipeline step isn't the fitted preprocessor, train/serve skew is back."""
+    from sklearn.pipeline import Pipeline
+
+    from src.ml.inference import load_models
+    models = load_models()
+    for tower in ("propensity", "ltv"):
+        m = models[tower]["model"]
+        assert isinstance(m, Pipeline), f"{tower} model is not a sklearn Pipeline"
+        assert "prep" in m.named_steps, f"{tower} pipeline missing 'prep' step"
 
 
 def test_propensity_features_match_ltv(needs_models):

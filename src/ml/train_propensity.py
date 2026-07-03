@@ -51,9 +51,11 @@ from sklearn.metrics import (
     roc_auc_score,
 )
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.pipeline import Pipeline
 from sqlalchemy import create_engine
 from xgboost import XGBClassifier
+
+from src.ml.preprocessing import make_preprocessor, select_raw_inputs
 
 warnings.filterwarnings("ignore", category=UserWarning)
 load_dotenv()
@@ -98,12 +100,6 @@ def load_features() -> pd.DataFrame:
     return df
 
 
-def keep_top_categories(df: pd.DataFrame, col: str, top_n: int = 10) -> pd.DataFrame:
-    top = df[col].value_counts().head(top_n).index
-    df[col] = df[col].where(df[col].isin(top), other="Other")
-    return df
-
-
 def stratified_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """Stratified 70/15/15 by payer × cohort × segment.
 
@@ -137,39 +133,19 @@ def stratified_split(df: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.D
     return train, val, test
 
 
-def prepare_features(
-    df: pd.DataFrame,
-    encoders: dict | None = None,
-    feature_set: list[str] | None = None,
-) -> tuple[pd.DataFrame, pd.Series, dict]:
-    df = keep_top_categories(df.copy(), "country", top_n=10)
-    y = df[TARGET].astype(int)
-    feats_to_use = feature_set or (NUMERIC_FEATURES + CATEGORICAL_FEATURES)
-    feats = df[feats_to_use].copy()
+def fit_preprocessor(train_df: pd.DataFrame, feature_set: list[str] | None = None):
+    """Fit the shared preprocessor on TRAIN data only; returns (prep, features).
 
-    for c in feats_to_use:
-        if c in NUMERIC_FEATURES:
-            feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0)
-
-    cat_in_set = [c for c in CATEGORICAL_FEATURES if c in feats_to_use]
-    if encoders is None:
-        encoders = {}
-        for c in cat_in_set:
-            le = LabelEncoder()
-            feats[c] = le.fit_transform(feats[c].astype(str))
-            encoders[c] = le
-    else:
-        for c in cat_in_set:
-            if c not in encoders:
-                continue
-            le = encoders[c]
-            known = set(le.classes_)
-            feats[c] = feats[c].astype(str).map(
-                lambda v: v if v in known else le.classes_[0]
-            )
-            feats[c] = le.transform(feats[c])
-
-    return feats, y, encoders
+    All bucketing decisions (top-N country membership, category vocabularies)
+    are learned here once and frozen inside the fitted object — audit and
+    serving reuse it via the bundled Pipeline instead of re-deriving anything.
+    """
+    features = feature_set or (NUMERIC_FEATURES + CATEGORICAL_FEATURES)
+    numeric = [f for f in features if f in NUMERIC_FEATURES]
+    categorical = [f for f in features if f in CATEGORICAL_FEATURES]
+    prep = make_preprocessor(numeric, categorical)
+    prep.fit(select_raw_inputs(train_df, features))
+    return prep, features
 
 
 def classification_metrics(y_true, y_pred, y_proba, prefix: str) -> dict:
@@ -212,9 +188,16 @@ def main():
         "test_user_ids":  test["user_id"].tolist(),
     }
 
-    X_train, y_train, encoders = prepare_features(train)
-    X_val,   y_val,   _ = prepare_features(val,  encoders=encoders)
-    X_test,  y_test,  _ = prepare_features(test, encoders=encoders)
+    # Fit preprocessing on TRAIN only; val/test/serving all reuse the same
+    # fitted object (it ships inside the bundle as part of the Pipeline).
+    prep, features = fit_preprocessor(train)
+    X_train = prep.transform(select_raw_inputs(train, features))
+    X_val   = prep.transform(select_raw_inputs(val,   features))
+    X_test  = prep.transform(select_raw_inputs(test,  features))
+    y_train = train[TARGET].astype(int)
+    y_val   = val[TARGET].astype(int)
+    y_test  = test[TARGET].astype(int)
+    feature_names_out = list(prep.get_feature_names_out())
 
     # Moderate regularization vs v2 — v2 had train AUC 0.72 vs test 0.65.
     # Depth=4 narrows gap to ~3 pp without sacrificing test signal.
@@ -326,8 +309,9 @@ def main():
             mlflow.log_metric(f"baseline_{name}_f1",  f1)
 
         # Demographic-only XGBoost baseline
-        X_train_d, _, enc_d = prepare_features(train, feature_set=DEMO_ONLY_FEATURES)
-        X_test_d,  _, _     = prepare_features(test,  encoders=enc_d, feature_set=DEMO_ONLY_FEATURES)
+        prep_d, demo_feats = fit_preprocessor(train, feature_set=DEMO_ONLY_FEATURES)
+        X_train_d = prep_d.transform(select_raw_inputs(train, demo_feats))
+        X_test_d  = prep_d.transform(select_raw_inputs(test,  demo_feats))
         demo_xgb = XGBClassifier(n_estimators=200, max_depth=4, learning_rate=0.05,
                                   random_state=SEED, n_jobs=-1, eval_metric="aucpr")
         demo_xgb.fit(X_train_d, y_train, verbose=False)
@@ -358,19 +342,23 @@ def main():
 
         # ── Feature importance from underlying XGBoost ────────────────────
         importance = pd.DataFrame({
-            "feature": X_train.columns,
+            "feature": feature_names_out,
             "importance": base.feature_importances_,
         }).sort_values("importance", ascending=False)
         print("\nTop 10 features (base XGBoost):")
         print(importance.head(10).to_string(index=False))
 
         # ── Save + register ───────────────────────────────────────────────
+        # The served artifact is ONE sklearn Pipeline: fitted preprocessor +
+        # calibrated classifier. Serving/audit call it on RAW feature columns;
+        # no encode logic exists outside this object.
+        served = Pipeline([("prep", prep), ("clf", model)])
         os.makedirs("saved_models", exist_ok=True)
         local_path = f"saved_models/propensity_v{run_id[:8]}.joblib"
         joblib.dump({
-            "model":             model,    # CalibratedClassifierCV wrapping XGBoost
-            "encoders":          encoders,
-            "features":          list(X_train.columns),
+            "model":             served,
+            "features":          features,           # raw input column names
+            "feature_names_out": feature_names_out,  # post-OHE names (importance)
             "method":            "isotonic_calibrated",
             "default_threshold": best_t,   # F1-optimal threshold from val
             "split":             split_record,  # held-out membership for honest audits
@@ -381,13 +369,15 @@ def main():
         # and CalibratedClassifierCV as untrusted; whitelist them explicitly.
         try:
             mlflow.sklearn.log_model(
-                model,
+                served,
                 name="propensity_model",
                 registered_model_name=MODEL_NAME,
                 skops_trusted_types=[
                     "sklearn.calibration._CalibratedClassifier",
                     "xgboost.core.Booster",
                     "xgboost.sklearn.XGBClassifier",
+                    "numpy.dtype",
+                    "src.ml.preprocessing._to_float64",
                 ],
             )
             print(f"✓ Registered as: {MODEL_NAME}")

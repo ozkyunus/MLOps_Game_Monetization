@@ -32,7 +32,7 @@ import warnings
 
 import joblib
 import mlflow
-import mlflow.xgboost
+import mlflow.sklearn
 import numpy as np
 import pandas as pd
 from dotenv import load_dotenv
@@ -42,9 +42,11 @@ from sklearn.metrics import (
     r2_score,
 )
 from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import LabelEncoder
+from sklearn.pipeline import Pipeline
 from sqlalchemy import create_engine
 from xgboost import XGBRegressor
+
+from src.ml.preprocessing import make_preprocessor, select_raw_inputs
 
 warnings.filterwarnings("ignore", category=UserWarning)
 load_dotenv()
@@ -92,12 +94,6 @@ def load_all() -> pd.DataFrame:
     return pd.read_sql("SELECT * FROM user_features_d7", engine)
 
 
-def keep_top_categories(df, col, top_n=10):
-    top = df[col].value_counts().head(top_n).index
-    df[col] = df[col].where(df[col].isin(top), other="Other")
-    return df
-
-
 def split_payers_only(df: pd.DataFrame):
     """Filter to payers, stratified split by cohort × segment.
 
@@ -121,28 +117,14 @@ def split_payers_only(df: pd.DataFrame):
     return train, val, test
 
 
-def prepare_features(df, encoders=None):
-    df = keep_top_categories(df.copy(), "country", top_n=10)
-    y = df[TARGET].astype(float)
-    feats = df[NUMERIC_FEATURES + CATEGORICAL_FEATURES].copy()
+FEATURES = NUMERIC_FEATURES + CATEGORICAL_FEATURES
 
-    for c in NUMERIC_FEATURES:
-        feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0)
 
-    if encoders is None:
-        encoders = {}
-        for c in CATEGORICAL_FEATURES:
-            le = LabelEncoder()
-            feats[c] = le.fit_transform(feats[c].astype(str))
-            encoders[c] = le
-    else:
-        for c in CATEGORICAL_FEATURES:
-            le = encoders[c]
-            known = set(le.classes_)
-            feats[c] = feats[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-            feats[c] = le.transform(feats[c])
-
-    return feats, y, encoders
+def fit_preprocessor(train_df: pd.DataFrame):
+    """Fit the shared preprocessor on TRAIN data only (see src/ml/preprocessing)."""
+    prep = make_preprocessor(NUMERIC_FEATURES, CATEGORICAL_FEATURES)
+    prep.fit(select_raw_inputs(train_df, FEATURES))
+    return prep
 
 
 def regression_metrics(y_true, y_pred, prefix):
@@ -183,9 +165,14 @@ def main():
         "test_user_ids":  test["user_id"].tolist(),
     }
 
-    X_train, y_train, encoders = prepare_features(train)
-    X_val,   y_val,   _ = prepare_features(val,  encoders=encoders)
-    X_test,  y_test,  _ = prepare_features(test, encoders=encoders)
+    prep = fit_preprocessor(train)
+    X_train = prep.transform(select_raw_inputs(train, FEATURES))
+    X_val   = prep.transform(select_raw_inputs(val,   FEATURES))
+    X_test  = prep.transform(select_raw_inputs(test,  FEATURES))
+    y_train = train[TARGET].astype(float)
+    y_val   = val[TARGET].astype(float)
+    y_test  = test[TARGET].astype(float)
+    feature_names_out = list(prep.get_feature_names_out())
 
     # Tuning grid (v3):
     #   log1p + no weights:        whale MAE $23 / minnow $3    → whales bad
@@ -277,27 +264,39 @@ def main():
 
         # ── Feature importance ───────────────────────────────────────────
         importance = pd.DataFrame({
-            "feature": X_train.columns,
+            "feature": feature_names_out,
             "importance": model.feature_importances_,
         }).sort_values("importance", ascending=False)
         print("\nTop 10 features:")
         print(importance.head(10).to_string(index=False))
 
         # ── Save + register primary ──────────────────────────────────────
+        # One Pipeline artifact: fitted preprocessor + regressor (see
+        # src/ml/preprocessing.py for why nothing encodes outside this object).
+        served = Pipeline([("prep", prep), ("reg", model)])
         os.makedirs("saved_models", exist_ok=True)
         local_path = f"saved_models/ltv_v{run_id[:8]}.joblib"
         joblib.dump({
-            "model":              model,
-            "encoders":           encoders,
-            "features":           list(X_train.columns),
+            "model":              served,
+            "features":           FEATURES,           # raw input column names
+            "feature_names_out":  feature_names_out,  # post-OHE names
             "target_transform":   "none",          # direct $ with Huber loss
             "objective":          "huber_direct",
             "trained_on":         "payers_only",
             "split":              split_record,    # held-out membership for honest audits
         }, local_path)
         mlflow.log_artifact(local_path)
-        mlflow.xgboost.log_model(model, artifact_path="ltv_model",
-                                 registered_model_name=MODEL_NAME)
+        try:
+            mlflow.sklearn.log_model(served, name="ltv_model",
+                                     registered_model_name=MODEL_NAME,
+                                     skops_trusted_types=[
+                                         "xgboost.core.Booster",
+                                         "xgboost.sklearn.XGBRegressor",
+                                         "numpy.dtype",
+                                         "src.ml.preprocessing._to_float64",
+                                     ])
+        except Exception as e:
+            print(f"⚠ MLflow log_model failed ({e}). Local joblib still saved.")
 
         print(f"\n✓ Primary model saved: {local_path}")
         print(f"✓ Registered as: {MODEL_NAME}")
@@ -314,8 +313,11 @@ def main():
             full_temp, test_size=0.50, random_state=SEED,
             stratify=full_temp["target_is_payer"].astype(str),
         )
-        X_ftr, y_ftr, enc_t = prepare_features(full_train)
-        X_fte, y_fte, _     = prepare_features(full_test,  encoders=enc_t)
+        prep_t = make_preprocessor(NUMERIC_FEATURES, CATEGORICAL_FEATURES)
+        X_ftr = prep_t.fit_transform(select_raw_inputs(full_train, FEATURES))
+        X_fte = prep_t.transform(select_raw_inputs(full_test, FEATURES))
+        y_ftr = full_train[TARGET].astype(float)
+        y_fte = full_test[TARGET].astype(float)
         tweedie = XGBRegressor(
             objective="reg:tweedie",
             tweedie_variance_power=1.5,

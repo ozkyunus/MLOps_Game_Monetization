@@ -67,7 +67,7 @@ from sklearn.metrics import brier_score_loss
 
 prop_path = max(glob.glob("saved_models/propensity_v*.joblib"), key=os.path.getmtime)
 bundle = joblib.load(prop_path)
-model, encoders, feats = bundle["model"], bundle["encoders"], bundle["features"]
+model, feats = bundle["model"], bundle["features"]  # model = Pipeline(prep + clf)
 threshold = bundle.get("default_threshold", 0.5)
 
 # ── Honest-split gate ──────────────────────────────────────────────────────
@@ -82,18 +82,9 @@ if not split_info:
     )
 test_ids = set(split_info["test_user_ids"])
 
+# All preprocessing lives inside the bundled Pipeline — feed it raw columns.
 work = df.copy()
-top = work["country"].value_counts().head(10).index
-work["country"] = work["country"].where(work["country"].isin(top), other="Other")
-X = pd.DataFrame({f: work[f] if f in work.columns else 0 for f in feats})
-for c in feats:
-    if c in encoders:
-        le = encoders[c]
-        known = set(le.classes_)
-        X[c] = X[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-        X[c] = le.transform(X[c])
-    else:
-        X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0)
+X = work[feats]
 y = work["target_is_payer"].values
 proba = model.predict_proba(X)[:, 1]
 
@@ -177,16 +168,8 @@ print("  v2: should show stronger Organic > TikTok ordering (~30%+) thanks to CH
 banner("AUDIT 6 — LTV model on non-payers (gating verification)")
 ltv_path = max(glob.glob("saved_models/ltv_v*.joblib"), key=os.path.getmtime)
 ltv_bundle = joblib.load(ltv_path)
-ltv_model, ltv_enc, ltv_feats = ltv_bundle["model"], ltv_bundle["encoders"], ltv_bundle["features"]
-X_ltv = pd.DataFrame({f: work[f] if f in work.columns else 0 for f in ltv_feats})
-for c in ltv_feats:
-    if c in ltv_enc:
-        le = ltv_enc[c]
-        known = set(le.classes_)
-        X_ltv[c] = X_ltv[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-        X_ltv[c] = le.transform(X_ltv[c])
-    else:
-        X_ltv[c] = pd.to_numeric(X_ltv[c], errors="coerce").fillna(0)
+ltv_model, ltv_feats = ltv_bundle["model"], ltv_bundle["features"]  # Pipeline(prep + reg)
+X_ltv = work[ltv_feats]
 
 # No silent default: a bundle missing this key must not be guessed at —
 # expm1() applied to a direct-$ model turns $30 into ~$10^13.

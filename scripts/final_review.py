@@ -119,26 +119,16 @@ banner("3 — PROPENSITY MODEL — calibration + overfit check", "═")
 # ═══════════════════════════════════════════════════════════════════════════
 prop_path = max(glob.glob("saved_models/propensity_v*.joblib"), key=os.path.getmtime)
 bundle = joblib.load(prop_path)
-model = bundle["model"]
-encoders = bundle["encoders"]
+model = bundle["model"]  # Pipeline(prep + calibrated clf) — all preprocessing inside
 features = bundle["features"]
 threshold = bundle.get("default_threshold", 0.5)
 print(f"\nLoaded: {prop_path}")
 print(f"  Method: {bundle.get('method')}  |  Default threshold: {threshold:.3f}")
 
-# Apply same preprocessing as training
+# The bundled Pipeline owns every preprocessing step (top-N bucketing, OHE,
+# imputation) — the audit feeds it raw columns and cannot drift from serving.
 work = df.copy()
-top = work["country"].value_counts().head(10).index
-work["country"] = work["country"].where(work["country"].isin(top), other="Other")
-X = pd.DataFrame({f: work[f] if f in work.columns else 0 for f in features})
-for c in features:
-    if c in encoders:
-        le = encoders[c]
-        known = set(le.classes_)
-        X[c] = X[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-        X[c] = le.transform(X[c])
-    else:
-        X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0)
+X = work[features]
 y = work["target_is_payer"].values
 
 # Use the split persisted in the bundle at training time. Reconstructing it
@@ -273,21 +263,12 @@ banner("7 — LTV MODEL — overfit + per-segment", "═")
 # ═══════════════════════════════════════════════════════════════════════════
 ltv_path = max(glob.glob("saved_models/ltv_v*.joblib"), key=os.path.getmtime)
 lt = joblib.load(ltv_path)
-ltv_model = lt["model"]; ltv_enc = lt["encoders"]; ltv_feats = lt["features"]
+ltv_model = lt["model"]; ltv_feats = lt["features"]  # Pipeline(prep + reg)
 print(f"\nLoaded: {ltv_path}")
 print(f"  Trained on: {lt.get('trained_on')}  |  Target transform: {lt.get('target_transform')}")
 
 payers = df[df["target_is_payer"] == 1].copy()
-payers["country"] = payers["country"].where(payers["country"].isin(top), other="Other")
-X_ltv = pd.DataFrame({f: payers[f] if f in payers.columns else 0 for f in ltv_feats})
-for c in ltv_feats:
-    if c in ltv_enc:
-        le = ltv_enc[c]
-        known = set(le.classes_)
-        X_ltv[c] = X_ltv[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-        X_ltv[c] = le.transform(X_ltv[c])
-    else:
-        X_ltv[c] = pd.to_numeric(X_ltv[c], errors="coerce").fillna(0)
+X_ltv = payers[ltv_feats]
 
 y_ltv = payers["target_ltv"].values
 # No silent default — expm1() applied to a direct-$ model would turn $30 into ~$10^13.
@@ -348,26 +329,8 @@ banner("8 — END-TO-END pLTV — non-payer gating verification", "═")
 # Apply both models on full data and check gating logic
 print(f"\nApplying full two-tower pipeline on all {len(df):,} users:\n")
 work_all = df.copy()
-work_all["country"] = work_all["country"].where(work_all["country"].isin(top), other="Other")
-X_p_all = pd.DataFrame({f: work_all[f] if f in work_all.columns else 0 for f in features})
-for c in features:
-    if c in encoders:
-        le = encoders[c]; kn = set(le.classes_)
-        X_p_all[c] = X_p_all[c].astype(str).map(lambda v: v if v in kn else le.classes_[0])
-        X_p_all[c] = le.transform(X_p_all[c])
-    else:
-        X_p_all[c] = pd.to_numeric(X_p_all[c], errors="coerce").fillna(0)
-proba_all = model.predict_proba(X_p_all)[:, 1]
-
-X_l_all = pd.DataFrame({f: work_all[f] if f in work_all.columns else 0 for f in ltv_feats})
-for c in ltv_feats:
-    if c in ltv_enc:
-        le = ltv_enc[c]; kn = set(le.classes_)
-        X_l_all[c] = X_l_all[c].astype(str).map(lambda v: v if v in kn else le.classes_[0])
-        X_l_all[c] = le.transform(X_l_all[c])
-    else:
-        X_l_all[c] = pd.to_numeric(X_l_all[c], errors="coerce").fillna(0)
-ltv_all = _ltv_predict(X_l_all)
+proba_all = model.predict_proba(work_all[features])[:, 1]
+ltv_all = _ltv_predict(work_all[ltv_feats])
 
 pltv_raw = proba_all * ltv_all
 pltv_gated = np.where(proba_all < 0.20, 0.0, pltv_raw)
@@ -386,24 +349,27 @@ print(work_all.groupby("target_is_payer")["served_pltv"].agg(["count", "mean", "
 # ═══════════════════════════════════════════════════════════════════════════
 banner("9 — FEATURE IMPORTANCE — what's the model actually using?", "═")
 # ═══════════════════════════════════════════════════════════════════════════
-# CalibratedClassifierCV wraps the base estimator; extract from .estimator
+# model is Pipeline(prep, clf=CalibratedClassifierCV(FrozenEstimator(xgb))) —
+# unwrap to the base XGBoost; names come from the persisted post-OHE list.
 try:
-    base = model.estimator if hasattr(model, "estimator") else model.calibrated_classifiers_[0].estimator
+    clf = model.named_steps["clf"]
+    base = getattr(clf, "estimator", clf)
+    base = getattr(base, "estimator", base)  # FrozenEstimator → XGBClassifier
     imp = pd.DataFrame({
-        "feature": features,
+        "feature": bundle.get("feature_names_out", []),
         "importance": base.feature_importances_,
     }).sort_values("importance", ascending=False)
-    print("\nPropensity model top features:")
-    print(imp.to_string(index=False))
+    print("\nPropensity model top features (post-OHE):")
+    print(imp.head(15).to_string(index=False))
 except Exception as exc:
     print(f"\n  Could not extract importance: {exc}")
 
-print("\nLTV model top features:")
+print("\nLTV model top features (post-OHE):")
 lt_imp = pd.DataFrame({
-    "feature": ltv_feats,
-    "importance": ltv_model.feature_importances_,
+    "feature": lt.get("feature_names_out", []),
+    "importance": ltv_model.named_steps["reg"].feature_importances_,
 }).sort_values("importance", ascending=False)
-print(lt_imp.to_string(index=False))
+print(lt_imp.head(15).to_string(index=False))
 
 
 # ═══════════════════════════════════════════════════════════════════════════

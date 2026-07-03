@@ -22,6 +22,8 @@ import pandas as pd
 from fastapi import HTTPException
 from sqlalchemy import create_engine, text
 
+from src.ml.preprocessing import select_raw_inputs
+
 mlflow.set_tracking_uri(os.getenv("MLFLOW_TRACKING_URI"))
 
 
@@ -118,27 +120,18 @@ def fetch_user_features(user_id: str) -> pd.DataFrame:
     return df
 
 
-def apply_encoders(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
-    encoders = bundle["encoders"]
-    features = bundle["features"]
+def model_inputs(df: pd.DataFrame, bundle: dict) -> pd.DataFrame:
+    """Select raw input columns for the bundled Pipeline.
 
-    df = df.copy()
-    if "country" in df.columns and "country" in encoders:
-        known = set(encoders["country"].classes_)
-        df["country"] = df["country"].where(df["country"].isin(known), other="Other")
-
-    feats = pd.DataFrame({f: df[f] if f in df.columns else 0 for f in features})
-
-    for c in features:
-        if c in encoders:
-            le = encoders[c]
-            known = set(le.classes_)
-            feats[c] = feats[c].astype(str).map(lambda v: v if v in known else le.classes_[0])
-            feats[c] = le.transform(feats[c])
-        else:
-            feats[c] = pd.to_numeric(feats[c], errors="coerce").fillna(0)
-
-    return feats
+    All preprocessing (top-N bucketing, one-hot, imputation) lives INSIDE the
+    fitted Pipeline shipped in the bundle — nothing is re-derived here. A
+    missing column is schema drift and fails loudly instead of being
+    zero-filled into silently-garbage predictions.
+    """
+    try:
+        return select_raw_inputs(df, bundle["features"])
+    except KeyError as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
 def predict_pltv(user_id: str, gate_threshold: float | None = None) -> dict:
@@ -159,14 +152,14 @@ def predict_pltv(user_id: str, gate_threshold: float | None = None) -> dict:
         cohort, NONPAYER_GATE_DEFAULT
     )
 
-    # Stage 1 — calibrated propensity
-    p_feats = apply_encoders(raw, models["propensity"])
+    # Stage 1 — calibrated propensity (bundled Pipeline: prep + calibrated clf)
+    p_feats = model_inputs(raw, models["propensity"])
     p_payer = float(models["propensity"]["model"].predict_proba(p_feats)[0, 1])
     threshold = models["propensity"].get("default_threshold", 0.5)
     is_predicted_payer = bool(p_payer >= threshold)
 
-    # Stage 2 — LTV regressor (target_transform-aware)
-    l_feats = apply_encoders(raw, models["ltv"])
+    # Stage 2 — LTV regressor (bundled Pipeline: prep + regressor)
+    l_feats = model_inputs(raw, models["ltv"])
     ltv_pred = float(models["ltv"]["model"].predict(l_feats)[0])
     # No silent default: guessing "log1p" for a direct-$ model would expm1()
     # a $30 prediction into ~$10^13. A bundle missing the key must fail loudly.
