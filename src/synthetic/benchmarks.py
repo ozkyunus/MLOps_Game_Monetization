@@ -22,6 +22,8 @@ from __future__ import annotations
 
 from typing import Final
 
+import numpy as np
+
 # ── Project target genre ─────────────────────────────────────────────────────
 # Our project models a "hybrid-casual" mobile game (deeper meta than
 # hyper-casual but still mass-market accessible). All benchmarks below
@@ -74,8 +76,37 @@ SEGMENT_LTV_RANGE_USD: Final[dict[str, tuple[float, float]]] = {
     "minnow":  (1.16, 10.0),  # exact real min
     "free":    (0.0, 0.0),
 }
-# Note: whale range $25-60 lets us add ~150 high-LTV users without
-# breaking the real distribution shape (median should stay ~$3-4).
+# NOTE: these ranges are GENERATION TARGETS (what LTV to sample for a user
+# the generator intends as whale/dolphin/minnow). The final `_segment` label
+# every downstream consumer sees is re-derived from REALIZED LTV via
+# `segment_from_ltv()` below — one canonical rule, applied identically to
+# real and synthetic users in scripts/build_features.py.
+
+
+# ── Canonical segment labeling — the ONLY segment-from-LTV rule ──────────────
+# v3 review found FOUR coexisting segment definitions (real-user thresholds,
+# synth generation ranges, engagement quantiles, hardcoded whale-cohort
+# proportions) feeding stratified splits whose strata didn't mean the same
+# thing across cohorts. This function replaces all of them at labeling time.
+SEGMENT_LTV_THRESHOLDS_USD: Final[dict[str, float]] = {
+    "whale":   20.0,   # matches the original real-backbone rule (LTV > $20)
+    "dolphin": 10.0,
+}
+
+
+def segment_from_ltv(ltv):
+    """Map realized LTV ($) → segment label. Accepts scalar or array."""
+    arr = np.asarray(ltv, dtype=float)
+    out = np.select(
+        [
+            arr > SEGMENT_LTV_THRESHOLDS_USD["whale"],
+            arr > SEGMENT_LTV_THRESHOLDS_USD["dolphin"],
+            arr > 0.0,
+        ],
+        ["whale", "dolphin", "minnow"],
+        default="free",
+    )
+    return out if np.ndim(ltv) else str(out)
 
 
 # ── IAP price points [2, 4] — power-law industry standard ────────────────────
@@ -169,8 +200,9 @@ CHANNEL_LTV_MULTIPLIER: Final[dict[str, float]] = {
 # trivial "all 1s" — which would make F1 metric meaningless.
 WHALE_COHORT_SIZE:           Final[int]   = 500
 WHALE_COHORT_NONPAYER_RATIO: Final[float] = 0.15  # 15% non-payers in whale cohort
-# Note: augmented_whale is TRAIN-ONLY (see train scripts). Evaluating on a
-# cohort that is 85% payers by design would mask real-world performance.
+# Note: with non-payers injected, augmented_whale participates in stratified
+# val/test (per-cohort AUC there is still near-meaningless — 85% positives by
+# design — but whale-MAE sample size depends on it).
 
 
 # ── Geo distribution targets — for augmentation balance ──────────────────────
@@ -198,8 +230,8 @@ GEO_DIVERSITY_TARGETS: Final[dict[str, float]] = {
 #         real Flood It! distribution.
 #   sessions_d7   = max(0, int(engagement_potential * channel_mult * 2.6))
 #   ad_views_d7   = poisson(sessions_d7 * 1.5)
-#   purchase_made ~ Bernoulli(sigmoid(engagement_potential - 1.8))
-#                   threshold tuned to give ~9% conversion
+#   purchase_made ~ Bernoulli(sigmoid(engagement_potential - PURCHASE_THRESHOLD))
+#                   threshold calibrated by simulation to CONVERSION_RATE
 #   amount_usd    ~ Categorical(IAP_PRICES, IAP_WEIGHTS) | purchase_made
 #   ltv_d30       = cumulative purchases per user
 #
@@ -212,10 +244,14 @@ ENGAGEMENT_LATENT_SIGMA: Final[float] = 1.0
 # Sessions per active user per day, conditional on engagement_potential
 SESSIONS_BASELINE_MULT: Final[float] = 2.6   # tuned to real Flood It! median
 
-# Conversion probability tuning (Bernoulli sigmoid threshold)
-# Calibrated: with engagement ~ LogNormal(0,1) × channel_mult (~1.0-1.3),
-# threshold=3.5 gives ~9% conversion (matches real backbone).
-PURCHASE_THRESHOLD: Final[float] = 3.5
+# Conversion probability tuning (Bernoulli sigmoid threshold).
+# Calibrated by direct simulation (2M LogNormal(0,1) draws):
+#   E[sigmoid(e − 4.87)] = 0.0910 ≈ CONVERSION_RATE ✓
+#   channel mult 0.65 (TikTok) → 4.8%  ·  1.15 (healthy) → 11.1%  ·  1.40 → 14.6%
+# History: v2 shipped threshold=3.5 with a comment claiming ~9%; the actual
+# simulated conversion was 18.0% — 2× target, violating our own
+# VALIDATION_THRESHOLDS. Caught in the v3 data-engineering review.
+PURCHASE_THRESHOLD: Final[float] = 4.87
 
 # Ad views per session (Poisson lambda multiplier)
 ADS_PER_SESSION_LAMBDA: Final[float] = 1.5

@@ -103,6 +103,24 @@ class TestConversionRate:
         assert 0.05 < B.CONVERSION_RATE < 0.15
 
 
+class TestCanonicalSegmentRule:
+    """B.segment_from_ltv is THE one segment-from-LTV rule (v3 unification)."""
+
+    def test_scalar_boundaries(self):
+        assert B.segment_from_ltv(0.0) == "free"
+        assert B.segment_from_ltv(0.99) == "minnow"
+        assert B.segment_from_ltv(10.0) == "minnow"    # threshold is strict >
+        assert B.segment_from_ltv(10.01) == "dolphin"
+        assert B.segment_from_ltv(20.0) == "dolphin"
+        assert B.segment_from_ltv(20.01) == "whale"
+        assert B.segment_from_ltv(60.0) == "whale"
+
+    def test_vectorized(self):
+        import numpy as np
+        out = B.segment_from_ltv(np.array([0.0, 5.0, 15.0, 45.0]))
+        assert list(out) == ["free", "minnow", "dolphin", "whale"]
+
+
 class TestWhaleCohortConfig:
     def test_cohort_size_reasonable(self):
         """v1 had 150 whales; v2 grew to 500. Anything under 200 breaks test stats."""

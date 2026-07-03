@@ -63,13 +63,48 @@ def test_purchase_probability_is_binary():
 
 
 def test_conversion_close_to_target():
-    """At the industry benchmark engagement mix, conversion ≈ target ±30%."""
-    # Baseline engagement distribution: mean ≈ 1.0 (LogNormal(0,1) has median 1).
-    engagement = sample_engagement_potential(20_000, np.ones(20_000))
+    """At channel multiplier 1.0, conversion must land in the project's own
+    VALIDATION_THRESHOLDS band (7-13%). v2's threshold=3.5 produced 18% —
+    this test would have caught it; the old 0.5%-20% band did not."""
+    from src.synthetic import benchmarks as B
+    engagement = sample_engagement_potential(50_000, np.ones(50_000))
     conversion = decide_purchase(engagement).mean()
-    # NOTE: this is a very loose bound — the point is to catch order-of-magnitude
-    # regressions (e.g. if someone flips the sigmoid sign), not fine calibration.
-    assert 0.005 < conversion < 0.20, f"conversion out of sanity range: {conversion:.4f}"
+    lo, hi = B.VALIDATION_THRESHOLDS["conversion_rate"]
+    assert lo < conversion < hi, f"conversion {conversion:.4f} outside ({lo}, {hi})"
+
+
+def test_generate_purchases_respects_prices_and_bounds():
+    """Every txn must be a real IAP price point; realized LTV must respect the
+    channel-adjusted segment cap and clear the floor. v2 clamped the last txn
+    (inventing prices like $40.01) and piled ~18% of whales at exactly $60."""
+    import pandas as pd
+
+    from src.synthetic import benchmarks as B
+    from src.synthetic.user_augmentation import generate_purchases
+
+    users = pd.DataFrame([
+        {"user_id": f"U{i}", "_segment": seg, "_cohort": "augmented_test",
+         "type": chan, "install_date": "2024-08-01"}
+        for i, (seg, chan) in enumerate(
+            [("whale", "Organic"), ("whale", "TikTok Ads"),
+             ("dolphin", "Organic"), ("minnow", "Organic")] * 25
+        )
+    ])
+    purchases = generate_purchases(users)
+    assert not purchases.empty
+
+    valid_prices = set(B.IAP_PRICES_USD)
+    assert set(purchases["value_in_USD"].unique()).issubset(valid_prices), \
+        "invented price points found — cap-clamping is back"
+
+    ltv_final = purchases.groupby("user_id").agg(
+        ltv=("ltv", "max"), seg=("_segment", "first")).reset_index()
+    users_idx = users.set_index("user_id")
+    for _, row in ltv_final.iterrows():
+        lo, hi = B.SEGMENT_LTV_RANGE_USD[row["seg"]]
+        mult = B.CHANNEL_LTV_MULTIPLIER[users_idx.loc[row["user_id"], "type"]]
+        assert row["ltv"] <= hi * mult + 1e-9, f"{row['user_id']} exceeds cap"
+        assert row["ltv"] >= lo * mult - 1e-9, f"{row['user_id']} below floor"
 
 
 class TestIndustryConstants:

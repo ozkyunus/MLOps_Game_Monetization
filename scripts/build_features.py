@@ -11,8 +11,11 @@ Honesty fixes vs v1 (see README → Limitations section for full discussion):
     state of affairs given we have no behavioral event data for them).
   - target_ltv_d30 → target_ltv (the underlying real data is a D7 snapshot,
     not a true D30 measurement; the v1 name was misleading).
-  - Channel-LTV multiplier flows through to real users too (so the model
-    sees channel-driven LTV variance).
+  - `_segment` is assigned by ONE canonical rule (B.segment_from_ltv on
+    realized LTV) for real and synth users alike — v2 had four coexisting
+    definitions feeding stratified splits with incomparable strata.
+  - Channel-LTV multiplier applies to SYNTH purchases only; the real backbone
+    has no channel-LTV variance (documented limitation in README).
 
 Steps:
   1. Load real users + real purchases from Postgres.
@@ -77,11 +80,9 @@ def derive_behavior_for_real_users(real_users: pd.DataFrame, real_purchases: pd.
     df["_sessions_d7"] = derive_sessions_d7(df["_engagement_potential"].values)
     df["_ad_views_d7"] = derive_ad_views_d7(df["_sessions_d7"].values)
 
-    # Segment from LTV (industry-standard thresholds)
+    # Segment assigned later on the combined frame via B.segment_from_ltv —
+    # placeholder here so the column exists for the common-cols selection.
     df["_segment"] = "free"
-    df.loc[df["_real_ltv"] > 0,  "_segment"] = "minnow"
-    df.loc[df["_real_ltv"] > 10, "_segment"] = "dolphin"
-    df.loc[df["_real_ltv"] > 20, "_segment"] = "whale"
 
     df["_cohort"]        = "real"
     df["_will_purchase"] = (df["_real_ltv"] > 0).astype(int)
@@ -179,6 +180,11 @@ def build_features() -> pd.DataFrame:
     # Mixed semantics — see README for the disclaimer downstream consumers see.
     combined["target_ltv"]       = combined["_real_ltv"]
     combined["target_is_payer"]  = combined["_will_purchase"]
+
+    # ── Canonical segment labels ─────────────────────────────────────────────
+    # ONE rule for everyone, real and synth: realized LTV → segment.
+    # Overrides the generation-time driver labels carried in synth_users.
+    combined["_segment"] = B.segment_from_ltv(combined["target_ltv"].values)
 
     feature_cols = [
         "user_id",

@@ -32,16 +32,16 @@ All v2.1 numbers are measured **strictly on the held-out test split persisted
 in the model bundle at training time** — see Limitations §9 for why that
 qualifier matters.
 
-| Metric | v1 (leaky) | v3 (honest, held-out test, observable features only) |
+| Metric | v1 (leaky) | v3.1 (honest: held-out test · observable features · calibrated generator) |
 |---|---|---|
-| Test AUC (combined) | 0.898 ⚠ *inflated* | **0.63** |
-| Test AUC (real cohort) | 0.915 ⚠ *leakage* | **0.50** — no telemetry, no signal |
-| Test AUC (synth cohorts) | ~0.90 | **0.61 – 0.85** — production-realistic |
-| Brier score | 0.114 | **0.102** |
-| Max calibration Δ | **0.40** *(broken)* | **0.072** |
-| Mean predicted P | 0.33 (vs actual 0.11 — 3× off) | **0.125 vs 0.125 ✓** |
-| Whale test n | 8 (useless) | **51** (CI ±$4.73) |
-| Non-payer served pLTV | $0.55 | **median $0** (gated; mean $0.63 from FP tail) |
+| Test AUC (combined) | 0.898 ⚠ *inflated* | **0.64** |
+| Test AUC (real cohort) | 0.915 ⚠ *leakage* | **0.57** — demographics only, no telemetry |
+| Test AUC (synth cohorts) | ~0.90 | **0.75 – 0.82** — production-realistic |
+| Brier score | 0.114 | **0.095** |
+| Max calibration Δ | **0.40** *(broken)* | **0.044** |
+| Mean predicted P | 0.33 (vs actual 0.11 — 3× off) | **0.111 vs 0.113 ✓** |
+| Whale test n | 8 (useless) | **64** (CI ±$3.57) |
+| Non-payer served pLTV | $0.55 | **median $0** (gated; mean $0.34 from FP tail) |
 
 Full audit in `scripts/final_review.py` (exits non-zero on hard failures),
 calibration plot at `saved_models/calibration_curve.png`.
@@ -348,9 +348,10 @@ in `audit_models.py`). Synthetic users still get engagement → LTV causally
 because that's how they were generated.
 
 **Implication**: Real-user predictions are essentially "demographic base
-rate" — AUC ≈ 0.58 on the real cohort, F1 ≈ 0.14. Synthetic users (where
-engagement is a real feature) get AUC 0.82-0.88. **The synthetic-cohort
-number is what we'd expect on production data with real telemetry.**
+rate" — AUC ≈ 0.57 on the real cohort. Synthetic users (whose sessions and
+ad views causally reflect engagement) get AUC 0.75-0.82. **The
+synthetic-cohort number is what we'd expect on production data with real
+telemetry.**
 
 ### 2. "D30 LTV" is actually a D7 observation
 
@@ -387,8 +388,8 @@ which left only ~8 in the stratified test set (statistically useless).
 
 **v2**: Whale cohort grown to 500 with 15% non-payers injected
 (`WHALE_COHORT_NONPAYER_RATIO`) — prevents trivial F1=1.0 while keeping
-the cohort whale-heavy by design. Stratified split now puts ~51 whales
-in test (95% CI on whale MAE: ±$3.11).
+the cohort whale-heavy by design. Stratified split now puts ~64 whales
+in test (95% CI on whale MAE: ±$3.57).
 
 ### 5. Channel-LTV signal is weak
 
@@ -421,22 +422,22 @@ demo; the LLM call is the real product.
 
 Regenerate with `uv run python -m scripts.audit_models`.
 
-| Metric | v1 (with leakage, scale_pos_weight=8) | v3 (calibrated, leak-free, observable-only) |
+| Metric | v1 (with leakage, scale_pos_weight=8) | v3.1 (calibrated, leak-free, observable-only) |
 |---|---|---|
-| Test AUC (combined) | 0.898 ← inflated | 0.626 ← honest |
-| Test AUC (synth cohorts) | similar | 0.61-0.85 |
-| Test AUC (real cohort) | 0.915 ← leakage | 0.50 ← honest |
-| Brier score | 0.114 | **0.102** |
-| Max calibration delta | **0.40** ← broken | 0.072 |
-| Mean predicted P | 0.33 vs actual 0.11 (3× off) | 0.125 vs 0.125 ✓ |
-| Whale test n | 8 | **51** |
-| Non-payer served pLTV | $0.55 mean | **median $0** (gated; mean $0.63) |
+| Test AUC (combined) | 0.898 ← inflated | 0.637 ← honest |
+| Test AUC (synth cohorts) | similar | 0.75-0.82 |
+| Test AUC (real cohort) | 0.915 ← leakage | 0.57 ← honest |
+| Brier score | 0.114 | **0.095** |
+| Max calibration delta | **0.40** ← broken | 0.044 |
+| Mean predicted P | 0.33 vs actual 0.11 (3× off) | 0.111 vs 0.113 ✓ |
+| Whale test n | 8 | **64** |
+| Non-payer served pLTV | $0.55 mean | **median $0** (gated; mean $0.34) |
 
-**Headline interpretation**: AUC dropped from 0.90 to ~0.63 not because the
+**Headline interpretation**: AUC dropped from 0.90 to ~0.64 not because the
 model got worse — but because we removed the leaked signal that was
-producing the inflated number. **~0.63 is the honest baseline** for what
-you can predict without behavioral telemetry (real cohort) averaged with
-what observable telemetry gives you (synth cohorts, 0.61-0.85).
+producing the inflated number. **~0.64 is the honest baseline** for what
+you can predict without behavioral telemetry (real cohort, 0.57) averaged
+with what observable telemetry gives you (synth cohorts, 0.75-0.82).
 
 ### 9. The audit itself had a bug (fixed in v2.1)
 
@@ -476,7 +477,38 @@ observable Poisson-derived proxies carry nearly all the usable signal. The
 claim "synth-cohort performance ≈ what real telemetry would give" is now
 defensible: the feature set contains nothing a real SDK couldn't log.
 
-### 11. What this proves for an interviewer
+### 11. The generator itself was miscalibrated (fixed in v3.1)
+
+A data-engineering review of the synthetic generator found five defects,
+all fixed together (the table was regenerated, so every metric above is
+from the recalibrated data):
+
+1. **Conversion 2× off**: `PURCHASE_THRESHOLD=3.5` carried a comment
+   claiming ~9% conversion; direct simulation (2M draws) showed **18.0%**,
+   violating the project's own `VALIDATION_THRESHOLDS`. Recalibrated to
+   4.87 → natural-cohort conversion now 10.0% ✓ within band.
+2. **LTV cap atom**: the last transaction was clamped to exactly
+   `cap − cumulative`, inventing non-existent price points ($40.01) and
+   piling ~18% of whales at exactly $60.00. Now generation stops *before*
+   exceeding the cap and tops up with the smallest pack to honour the
+   segment floor (which ~17% of minnows previously violated).
+3. **Four coexisting segment definitions** (real-user thresholds, synth
+   generation ranges, engagement quantiles, hardcoded cohort proportions)
+   fed stratified splits whose strata meant different things per cohort.
+   Now ONE canonical rule — `B.segment_from_ltv(realized LTV)` — labels
+   real and synth users identically at feature-build time.
+4. **Reproducibility was fictional**: user ids came from `uuid.uuid4()`
+   (reads `os.urandom`, ignores the seed) — every rerun produced brand-new
+   ids. Ids now come from the seeded RNG, making `SEED=42` actually mean
+   something.
+5. **The printed conversion check could never pass**: it included the
+   whale cohort (85% payers by design), always showing ~28% vs a 9% target.
+   It now excludes designed cohorts and asserts against the validation band.
+
+Both synthetic tables are also written in a **single transaction**, so a
+mid-write crash can't pair new users with stale purchases.
+
+### 12. What this proves for an interviewer
 
 | Skill | Where it shows |
 |---|---|
@@ -523,6 +555,7 @@ source inline.
 - ✅ Honest audit: metrics locked to the held-out split persisted in the bundle
 - ✅ Preprocessing as ONE fitted Pipeline inside the bundle (kills train/serve skew; unknown categories → honest "Other" bucket, schema drift → loud error)
 - ✅ v3 feature set: generator latents (`_engagement_potential`, `engagement_bucket`) removed — models consume only signals a real telemetry SDK could emit
+- ✅ v3.1 generator recalibration: conversion simulated to target (10.0% vs 18% bug), LTV floor/cap artifacts removed, ONE canonical segment rule, seeded reproducible user ids, transactional writes
 - ✅ GitHub Actions CI (ruff + pytest + docker build on PR)
 - ✅ pytest suite (51 tests: benchmarks, synthetic gen, inference, routers)
 - ✅ Real Gemini offer copy via LangChain (with offline fallback templates)

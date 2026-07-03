@@ -12,9 +12,14 @@ Key property: behaviors → LTV (never LTV → behaviors).
 Models learning LTV from behaviors is legitimate, not memorization.
 
 Three cohorts produced:
-  - whale_cohort   : ~150 high-engagement users (whale + dolphin segments)
-  - geo_diversity  : ~800 users across underrepresented geos
-  - healthy_cohort : ~1500 users from a "later launch" date window
+  - whale_cohort   : B.WHALE_COHORT_SIZE (500) users, payer-heavy by design
+  - geo_diversity  : 800 users across underrepresented geos
+  - healthy_cohort : 1500 users from a "later launch" date window
+
+Segment labels assigned here are GENERATION DRIVERS (they pick the LTV range
+to sample). The final `_segment` label everything downstream consumes is
+re-derived from realized LTV by `B.segment_from_ltv` in scripts/build_features
+— one canonical rule for real and synth alike.
 
 Outputs written to Postgres:
   - synth_users      : user-level profile + behavior aggregates
@@ -26,7 +31,6 @@ from __future__ import annotations
 
 import os
 import random
-import uuid
 from datetime import timedelta
 
 import numpy as np
@@ -55,6 +59,17 @@ random.seed(SEED)
 np.random.seed(SEED)
 
 
+def make_user_ids(n: int) -> list[str]:
+    """Deterministic 32-hex user ids drawn from the SEEDED numpy RNG.
+
+    v2 used uuid.uuid4(), which reads os.urandom and ignores the seed — every
+    re-run produced entirely new ids, silently invalidating anything keyed on
+    user_id (persisted splits, cached scores, cross-run joins). With ids from
+    the seeded stream, seed=42 reproducibility is actually true.
+    """
+    return [np.random.bytes(16).hex().upper() for _ in range(n)]
+
+
 # ── Forward-causal helpers ───────────────────────────────────────────────────
 
 def sample_engagement_potential(n: int, channel_mult: np.ndarray) -> np.ndarray:
@@ -78,22 +93,25 @@ def derive_sessions_d7(engagement: np.ndarray) -> np.ndarray:
 
 
 def derive_ad_views_d7(sessions_d7: np.ndarray) -> np.ndarray:
-    """ad_views_d7 ~ Poisson(sessions * lambda).
-    Free users see MORE ads than payers (industry pattern).
-    """
+    """ad_views_d7 ~ Poisson(sessions * lambda) — proportional to sessions,
+    so more-engaged users see more ads in absolute terms."""
     return np.random.poisson(
         lam=sessions_d7 * B.ADS_PER_SESSION_LAMBDA,
     ).astype(int)
 
 
 def decide_purchase(engagement: np.ndarray) -> np.ndarray:
-    """Bernoulli sigmoid — calibrated to give ~9% conversion."""
+    """Bernoulli(sigmoid(engagement − threshold)). PURCHASE_THRESHOLD is
+    simulation-calibrated so E[conversion] ≈ B.CONVERSION_RATE at channel
+    multiplier 1.0 (see benchmarks.py for the calibration record)."""
     prob = 1.0 / (1.0 + np.exp(-(engagement - B.PURCHASE_THRESHOLD)))
     return (np.random.random(size=len(engagement)) < prob).astype(int)
 
 
 def assign_segment(engagement: np.ndarray, will_purchase: np.ndarray) -> np.ndarray:
-    """Segment derived from engagement (causal, not arbitrary)."""
+    """GENERATION DRIVER: picks which LTV range a payer will sample from,
+    based on engagement quantiles. The final `_segment` label downstream is
+    re-derived from realized LTV (B.segment_from_ltv) in build_features."""
     segments = np.full(len(engagement), "free", dtype=object)
     payer_mask = will_purchase == 1
 
@@ -147,15 +165,30 @@ def generate_purchases(
 
         cumulative = 0.0
         install_dt = pd.to_datetime(user["install_date"])
+        amounts: list[float] = []
 
+        # Draw transactions, stopping BEFORE the cap is exceeded. v2 clamped
+        # the final txn to exactly (cap − cumulative), which (a) produced
+        # amounts that aren't valid IAP price points ($40.01) and (b) piled a
+        # point-mass at exactly ltv_max — ~18% of whales sat at $60.00 flat,
+        # instantly visible in any histogram/KS test.
         for _ in range(n_txn):
             amount = float(np.random.choice(B.IAP_PRICES_USD, p=weights))
-            # Cap last txn so we don't blow past channel-adjusted ltv_max
             if cumulative + amount > ltv_max_chan:
-                if cumulative >= ltv_min_chan:
-                    break
-                amount = max(0.99, ltv_max_chan - cumulative)
+                break
             cumulative += amount
+            amounts.append(amount)
+
+        # Floor top-up with the smallest pack: v2 let ~17% of minnows finish
+        # below the declared segment floor (single $0.99 txn vs $1.16 min).
+        smallest = min(B.IAP_PRICES_USD)
+        while cumulative < ltv_min_chan and cumulative + smallest <= ltv_max_chan:
+            cumulative += smallest
+            amounts.append(smallest)
+
+        running = 0.0
+        for amount in amounts:
+            running += amount
             txn_counter += 1
             days_after = random.randint(0, 30)
             rows.append({
@@ -163,7 +196,7 @@ def generate_purchases(
                 "user_id":     user["user_id"],
                 "date":        install_dt + timedelta(days=days_after),
                 "value_in_USD": round(amount, 2),
-                "ltv":         round(cumulative, 2),
+                "ltv":         round(running, 2),
                 "_segment":    seg,
                 "_cohort":     user["_cohort"],
             })
@@ -177,17 +210,15 @@ def generate_whale_cohort(synth: GaussianCopulaSynthesizer, n: int | None = None
     """High-engagement users sampled with iOS bias + premium geos.
 
     Design notes:
-      - n defaults to B.WHALE_COHORT_SIZE (500) — large enough for ≥75 whale
-        samples in stratified test (was 8 in v1, statistically unusable).
-      - ~15% non-payers injected (B.WHALE_COHORT_NONPAYER_RATIO) — prevents
-        the "100% payer trivial F1" problem.
-      - augmented_whale is TRAIN-ONLY (filtered out of val/test in train
-        scripts). Evaluating on a designed-positive cohort would mask
-        real-world performance.
+      - n defaults to B.WHALE_COHORT_SIZE (500) — large enough for a usable
+        whale sample in stratified test (was 8 in v1, statistically unusable).
+      - B.WHALE_COHORT_NONPAYER_RATIO non-payers injected — prevents the
+        "100% payer trivial F1" problem and lets the cohort participate in
+        stratified val/test.
     """
     n = n if n is not None else B.WHALE_COHORT_SIZE
     df = synth.sample(num_rows=n)
-    df["user_id"] = [str(uuid.uuid4()).upper().replace("-", "") for _ in range(n)]
+    df["user_id"] = make_user_ids(n)
     df["country"] = np.random.choice(
         ["United States", "Japan", "South Korea", "United Kingdom", "Germany"],
         size=n, p=[0.45, 0.20, 0.15, 0.10, 0.10],
@@ -205,14 +236,15 @@ def generate_whale_cohort(synth: GaussianCopulaSynthesizer, n: int | None = None
     df["_sessions_d7"] = derive_sessions_d7(df["_engagement_potential"].values)
     df["_ad_views_d7"] = derive_ad_views_d7(df["_sessions_d7"].values)
 
-    # Forced segment composition (instead of engagement-quantile assignment):
-    # 60% whale, 20% dolphin, 5% minnow, 15% non-payer.
-    # This is what "whale cohort" should mean — designed to add whale rows
-    # to the dataset, not just "high-engagement users".
-    n_whale   = int(n * 0.60)
-    n_dolphin = int(n * 0.20)
-    n_minnow  = int(n * 0.05)
-    n - n_whale - n_dolphin - n_minnow
+    # Forced segment composition (instead of engagement-quantile assignment).
+    # Non-payer share comes from B.WHALE_COHORT_NONPAYER_RATIO (v2 hardcoded
+    # 15% and never read the constant — editing it did nothing). Payers split
+    # whale:dolphin:minnow = 12:4:1, i.e. 60/20/5 of the cohort at ratio 0.15.
+    n_free    = int(round(n * B.WHALE_COHORT_NONPAYER_RATIO))
+    n_payers  = n - n_free
+    n_whale   = int(round(n_payers * 12 / 17))
+    n_dolphin = int(round(n_payers * 4 / 17))
+    n_minnow  = n_payers - n_whale - n_dolphin
 
     idx = np.random.permutation(n)
     seg_array = np.empty(n, dtype=object)
@@ -239,7 +271,7 @@ def generate_geo_diversity_cohort(
 ) -> pd.DataFrame:
     """Underrepresented geos with natural conversion rate."""
     df = synth.sample(num_rows=n)
-    df["user_id"] = [str(uuid.uuid4()).upper().replace("-", "") for _ in range(n)]
+    df["user_id"] = make_user_ids(n)
     # Sample geo from diversity distribution
     countries = list(B.GEO_DIVERSITY_TARGETS.keys())
     probs = list(B.GEO_DIVERSITY_TARGETS.values())
@@ -265,7 +297,7 @@ def generate_healthy_cohort(
     versions used Sep dates which broke any temporal-aware downstream task.
     """
     df = synth.sample(num_rows=n)
-    df["user_id"] = [str(uuid.uuid4()).upper().replace("-", "") for _ in range(n)]
+    df["user_id"] = make_user_ids(n)
     df["install_date"] = pd.to_datetime(
         np.random.choice(pd.date_range("2024-08-01", "2024-08-30"), size=n)
     )
@@ -319,8 +351,19 @@ def run() -> None:
     synth_purchases = generate_purchases(synth_users)
     print(f"  ✓ Synthetic purchases: {len(synth_purchases):,}")
     print(f"  Unique paying users:   {synth_purchases['user_id'].nunique():,}")
-    sim_conv = synth_purchases["user_id"].nunique() / len(synth_users)
-    print(f"  Simulated conversion:  {sim_conv * 100:.2f}% (target: {B.CONVERSION_RATE * 100:.2f}%)")
+
+    # Conversion calibration check — EXCLUDING the whale cohort, which is
+    # 85% payers by design and would drown the signal (v2 included it, so the
+    # printed check always showed ~28% vs a 9% target and verified nothing).
+    natural = synth_users[synth_users["_cohort"] != "augmented_whale"]
+    natural_payers = synth_purchases.loc[
+        synth_purchases["_cohort"] != "augmented_whale", "user_id"
+    ].nunique()
+    sim_conv = natural_payers / len(natural)
+    lo, hi = B.VALIDATION_THRESHOLDS["conversion_rate"]
+    band = "✓ within band" if lo <= sim_conv <= hi else f"⚠ OUTSIDE band ({lo:.0%}-{hi:.0%})"
+    print(f"  Natural-cohort conversion: {sim_conv * 100:.2f}% "
+          f"(target {B.CONVERSION_RATE * 100:.2f}%)  {band}")
 
     # LTV summary (calibration check)
     print("\nLTV by segment (synthetic):")
@@ -328,10 +371,13 @@ def run() -> None:
         ["count", "mean", "min", "50%", "max"]
     ])
 
-    # Write to Postgres
-    print("\nWriting to Postgres...")
-    synth_users.to_sql("synth_users", engine, if_exists="replace", index=False)
-    synth_purchases.to_sql("synth_purchases", engine, if_exists="replace", index=False)
+    # Write to Postgres — both tables in ONE transaction, so a crash mid-write
+    # can't leave new synth_users paired with stale synth_purchases (which
+    # build_features would silently join into payer=1/ltv=0 contradictions).
+    print("\nWriting to Postgres (single transaction)...")
+    with engine.begin() as conn:
+        synth_users.to_sql("synth_users", conn, if_exists="replace", index=False)
+        synth_purchases.to_sql("synth_purchases", conn, if_exists="replace", index=False)
     print(f"  ✓ synth_users:     {len(synth_users):,} rows")
     print(f"  ✓ synth_purchases: {len(synth_purchases):,} rows")
 
