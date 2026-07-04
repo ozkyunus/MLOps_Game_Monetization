@@ -73,6 +73,18 @@ services:
       retries: 10
 
   # ═════════════════════════════════════════════════════════════════════════
+  qdrant:
+    # Vector store for the Monetization Copilot's RAG knowledge base.
+    # Deliberately a dedicated service (vs pgvector) — see the design spec.
+    image: qdrant/qdrant:latest
+    container_name: monetization_qdrant
+    restart: unless-stopped
+    ports:
+      - "6333:6333"                          # REST API + web UI (/dashboard)
+    volumes:
+      - qdrant_data:/qdrant/storage
+
+  # ═════════════════════════════════════════════════════════════════════════
   api:
     build:
       context: .
@@ -90,6 +102,7 @@ services:
       SQLALCHEMY_DATABASE_URL: postgresql+psycopg2://${POSTGRES_USER:-train}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-monetization_db}
       MLFLOW_TRACKING_URI: http://mlflow:5000
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      QDRANT_URL: http://qdrant:6333
     ports:
       - "8000:8000"
     volumes:
@@ -138,11 +151,13 @@ services:
         --browser.gatherUsageStats=false
 
 # ───────────────────────────────────────────────────────────────────────────
-# Named volume. `name:` pins the exact Docker volume name WITHOUT declaring
+# Named volumes. `name:` pins the exact Docker volume name WITHOUT declaring
 # it external — compose creates it on a fresh machine (external: true used to
 # abort `docker compose up` on every machine but the author's) and reuses the
-# existing one where it already exists. `down -v` really wipes it.
+# existing one where it already exists. `down -v` really wipes them.
 # ───────────────────────────────────────────────────────────────────────────
 volumes:
   monetization_postgres_data:
     name: monetization_postgres_data
+  qdrant_data:
+    name: monetization_qdrant_data

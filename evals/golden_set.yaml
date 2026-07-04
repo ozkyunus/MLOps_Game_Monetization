@@ -1,0 +1,137 @@
+# ═══════════════════════════════════════════════════════════════════════════
+# COPILOT GOLDEN SET — the LLM's "held-out test set"
+# ═══════════════════════════════════════════════════════════════════════════
+# Her giriş bir soru + beklenen davranış tanımı. Alanlar:
+#   id:               kısa benzersiz slug
+#   question:         kullanıcının soracağı soru (TR veya EN)
+#   expected_sources: cevabın GETİRMESİ gereken doküman id'leri (dosya adının
+#                     baştaki NN-slug kısmı, örn: 01-hybrid-casual-retention-benchmarks)
+#                     — boş liste = doküman gerekmiyor
+#   expected_tools:   çağırması GEREKEN tool'lar (boş = tool gerekmez)
+#   must_contain:     cevapta geçmesi gereken ifadeler/sayılar (case-insensitive)
+#   must_not_contain: geçmemesi gerekenler
+#   expected_behavior: "answer" (varsayılan) | "refuse" (kapsam dışı — reddetmeli)
+#
+# Kategoriler dengeli olsun:
+#   A) Saf doküman sorusu (RAG)      B) Saf veri sorusu (tool)
+#   C) Karma (RAG + tool)            D) Kapsam dışı (refuse)
+# ═══════════════════════════════════════════════════════════════════════════
+
+# ── ÖRNEKLER (asistan yazdı — formatı gör) ──────────────────────────────────
+
+- id: benchmark-d7-retention
+  category: A
+  question: "What is a good D7 retention for a hybrid-casual game?"
+  expected_sources: ["01-hybrid-casual-retention-benchmarks"]
+  expected_tools: []
+  must_contain: ["15"]
+  expected_behavior: answer
+
+- id: my-tiktok-roas
+  category: C
+  question: "TikTok kampanyamın ROAS'ı sektöre göre iyi mi kötü mü?"
+  expected_sources: []          # benchmark dokümanı gelirse bonus; şart olan tool
+  expected_tools: ["get_channel_roi"]
+  must_contain: []
+  expected_behavior: answer
+
+- id: out-of-scope-weather
+  category: D
+  question: "İstanbul'da yarın hava nasıl olacak?"
+  expected_sources: []
+  expected_tools: []
+  expected_behavior: refuse
+
+# ── A: saf doküman soruları ─────────────────────────────────────────────────
+
+- id: benchmark-d1-retention
+  category: A
+  question: "Hybrid-casual bir oyunda D1 retention kaç olmalı? Düşükse ne anlama gelir?"
+  expected_sources: ["01-hybrid-casual-retention-benchmarks"]
+  expected_tools: []
+  must_contain: ["34"]
+  expected_behavior: answer
+
+- id: cpi-ios-android
+  category: A
+  question: "What are typical CPI values for iOS vs Android in casual games?"
+  expected_sources: ["02-mobile-game-cpi-and-channel-quality"]
+  expected_tools: []
+  must_contain: [["4.22", "4,22"], ["2.97", "2,97"]]
+  expected_behavior: answer
+
+- id: whale-revenue-share
+  category: A
+  question: "Whale'ler gelirin ne kadarını oluşturur, whale stratejisi ne olmalı?"
+  expected_sources: ["03-spender-segmentation-whales"]
+  expected_tools: []
+  must_contain: []
+  expected_behavior: answer
+
+- id: rewarded-vs-interstitial
+  category: A
+  question: "Why does rewarded video have a higher eCPM than interstitials?"
+  expected_sources: ["04-ad-monetization-ecpm"]
+  expected_tools: []
+  must_contain: ["opt-in"]
+  expected_behavior: answer
+
+- id: real-cohort-trust
+  category: A
+  question: "Bu platformda real cohort tahminlerine neden temkinli yaklaşmalıyım?"
+  expected_sources: ["05-platform-capabilities-and-limits"]
+  expected_tools: []
+  must_contain: []
+  expected_behavior: answer
+
+# ── B: saf veri soruları (tool) ──────────────────────────────────────────────
+
+- id: my-channel-cpi
+  category: B
+  question: "Kanallarımın CPI ve ROAS değerleri neler? En kötü kanal hangisi?"
+  expected_sources: []
+  expected_tools: ["get_channel_roi"]
+  must_contain: []
+  expected_behavior: answer
+
+- id: my-retention-by-platform
+  category: B
+  question: "Platform bazında (ios/android) retention'ım nasıl görünüyor?"
+  expected_sources: []
+  expected_tools: ["get_retention"]
+  must_contain: []
+  expected_behavior: answer
+
+# ── C: karma (doküman + tool) ────────────────────────────────────────────────
+
+- id: retention-vs-benchmark
+  category: C
+  question: "Kanal bazlı D7 retention'ımı sektör benchmark'ıyla karşılaştır."
+  expected_sources: ["01-hybrid-casual-retention-benchmarks"]
+  expected_tools: ["get_retention"]
+  must_contain: []
+  expected_behavior: answer
+
+- id: tiktok-decision
+  category: C
+  question: "Should I cut my TikTok campaign? Compare my numbers to what the industry says about TikTok traffic."
+  expected_sources: ["02-mobile-game-cpi-and-channel-quality"]
+  expected_tools: ["get_channel_roi"]
+  must_contain: []
+  expected_behavior: answer
+
+# ── D: kapsam dışı (refuse) ──────────────────────────────────────────────────
+
+- id: out-of-scope-poem
+  category: D
+  question: "Bana aşk üzerine bir şiir yazar mısın?"
+  expected_sources: []
+  expected_tools: []
+  expected_behavior: refuse
+
+- id: out-of-scope-stock
+  category: D
+  question: "Which stocks should I buy this week?"
+  expected_sources: []
+  expected_tools: []
+  expected_behavior: refuse

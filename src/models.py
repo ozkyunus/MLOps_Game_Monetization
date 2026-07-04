@@ -115,6 +115,35 @@ class DecisionRequest(SQLModel):
     context: Literal["level_complete", "after_loss", "app_open"] = "app_open"
 
 
+class CopilotRequest(SQLModel):
+    question: str
+    conversation_id: str | None = None
+
+
+# -------------------- Copilot telemetry --------------------
+# One row per copilot turn — the LLM analogue of PredictionLog. Feeds the
+# eval harness, the Grafana LLM dashboard, and cost tracking.
+
+class CopilotLog(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    conversation_id: str | None = Field(default=None, index=True)
+    question: str
+    answer: str
+    refused: bool = False
+    sources: str | None = None        # JSON list of {doc_id,title,section}
+    tool_calls: str | None = None     # JSON list of {tool,args,ms}
+    prompt_version: str
+    model_name: str
+    input_tokens: int = 0
+    output_tokens: int = 0
+    latency_ms: float = 0.0
+    retrieval_ms: float = 0.0
+    created_at: datetime | None = Field(
+        default_factory=lambda: datetime.now(UTC),
+        sa_column_kwargs={"server_default": text("CURRENT_TIMESTAMP")},
+    )
+
+
 # -------------------- Model registry mirror --------------------
 
 class ModelVersion(SQLModel, table=True):

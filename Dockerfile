@@ -62,6 +62,8 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY --chown=${APP_USER}:${APP_USER} src/       ./src/
 COPY --chown=${APP_USER}:${APP_USER} dashboard/ ./dashboard/
 COPY --chown=${APP_USER}:${APP_USER} scripts/   ./scripts/
+COPY --chown=${APP_USER}:${APP_USER} prompts/   ./prompts/
+COPY --chown=${APP_USER}:${APP_USER} knowledge/ ./knowledge/
 
 # Model artifacts and calibration plot — baked into the image so the container
 # runs standalone. In production these would come from a volume/S3 instead.

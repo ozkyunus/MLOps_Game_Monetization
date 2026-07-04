@@ -23,7 +23,7 @@ def test_root_lists_services(api_client):
     # Exact match — the root endpoint once advertised nonexistent services
     # ("ad-cap", "segment") and a loose >= assertion masked it.
     assert set(payload["services"]) == {
-        "propensity", "decide", "channel", "cohort", "personalized",
+        "propensity", "decide", "channel", "cohort", "personalized", "copilot",
     }
 
 

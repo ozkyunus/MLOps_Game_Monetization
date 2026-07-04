@@ -45,3 +45,6 @@ postgres_data/
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Eval run outputs
+evals/results/

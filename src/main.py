@@ -16,7 +16,7 @@ from sqlalchemy import text
 from src import models  # noqa: F401 — register SQLModel tables
 from src.database import create_db_and_tables, get_engine
 from src.ml.inference import load_models
-from src.routers import channel, cohort, decide, personalized, propensity
+from src.routers import channel, cohort, copilot, decide, personalized, propensity
 
 
 @asynccontextmanager
@@ -39,6 +39,7 @@ app.include_router(decide.router)
 app.include_router(channel.router)
 app.include_router(cohort.router)
 app.include_router(personalized.router)
+app.include_router(copilot.router)
 
 
 @app.get("/")
@@ -47,7 +48,7 @@ def root():
         "message": "Player Monetization Intelligence Platform",
         "version": "0.1.0",
         "docs": "/docs",
-        "services": ["propensity", "decide", "channel", "cohort", "personalized"],
+        "services": ["propensity", "decide", "channel", "cohort", "personalized", "copilot"],
     }
 
 
