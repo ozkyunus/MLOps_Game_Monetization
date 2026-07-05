@@ -31,6 +31,7 @@ def copilot_chat(payload: CopilotRequest):
         )
 
     from src.copilot.agent import ask  # lazy: keeps module import light
+    from src.metrics import record_copilot_turn
     try:
         result = ask(payload.question)
     except Exception as exc:
@@ -38,6 +39,8 @@ def copilot_chat(payload: CopilotRequest):
             status_code=502,
             detail=f"Copilot backend error: {type(exc).__name__}: {exc}",
         ) from exc
+
+    record_copilot_turn(result)
 
     with Session(db_engine) as session:
         session.add(CopilotLog(

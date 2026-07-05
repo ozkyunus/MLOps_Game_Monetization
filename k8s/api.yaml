@@ -49,19 +49,34 @@ spec:
                   optional: true          # boots without it; /copilot + LLM copy 503
             - name: MLFLOW_TRACKING_URI
               value: http://mlflow:5000
+            # Cap mlflow-client's retry storm: registry lookups are metadata
+            # niceties — a down MLflow must never hold model serving hostage.
+            - name: MLFLOW_HTTP_REQUEST_MAX_RETRIES
+              value: "1"
+            - name: MLFLOW_HTTP_REQUEST_TIMEOUT
+              value: "5"
             - name: QDRANT_URL
               value: http://qdrant:6333
+          # ML containers start SLOW (DDL + joblib model loads + MLflow
+          # lookups happen in the lifespan before the server accepts
+          # traffic). Without a startupProbe, the liveness budget
+          # (20s + 3×15s) killed pods mid-warm-up → CrashLoopBackOff.
+          # startupProbe grants up to 5 minutes; liveness/readiness only
+          # begin AFTER it passes.
+          startupProbe:
+            httpGet: {path: /healthz, port: http}
+            periodSeconds: 5
+            failureThreshold: 60
           readinessProbe:
             httpGet: {path: /readyz, port: http}
-            initialDelaySeconds: 10
             periodSeconds: 10
-            timeoutSeconds: 5
+            timeoutSeconds: 10
+            failureThreshold: 3
           livenessProbe:
             httpGet: {path: /healthz, port: http}
-            initialDelaySeconds: 20
             periodSeconds: 15
           resources:
-            requests: {cpu: 250m, memory: 768Mi}
+            requests: {cpu: 500m, memory: 768Mi}
             limits:   {cpu: "1",  memory: 2Gi}
 ---
 apiVersion: v1

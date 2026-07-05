@@ -1,0 +1,39 @@
+# ServiceMonitors — Prometheus Operator CRDs telling Prometheus what to
+# scrape. The `release: kube-prometheus-stack` label is MANDATORY: the
+# default Prometheus only selects monitors carrying its Helm release name
+# (the classic silent-failure trap — wrong label → no error, no metrics).
+#
+# Requires kube-prometheus-stack to be installed first (CRDs must exist).
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: api
+  namespace: monetization
+  labels:
+    app: api
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: api
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: qdrant
+  namespace: monetization
+  labels:
+    app: qdrant
+    release: kube-prometheus-stack
+spec:
+  selector:
+    matchLabels:
+      app: qdrant
+  endpoints:
+    - port: http
+      path: /metrics
+      interval: 15s

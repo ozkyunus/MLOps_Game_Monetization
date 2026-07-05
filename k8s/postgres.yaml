@@ -77,10 +77,19 @@ metadata:
   name: postgres
   namespace: monetization
 spec:
-  type: ClusterIP           # DB is cluster-internal only
+  # LoadBalancer on 5434 keeps the HOST-side contract identical to the old
+  # compose setup: .env, pytest, training scripts and pgAdmin all connect to
+  # localhost:5434 unchanged. In-cluster clients use postgres:5432.
+  # (Cloud production would keep this ClusterIP-only.)
+  type: LoadBalancer
   selector:
     app: postgres
   ports:
-    - name: postgres
+    # BOTH ports must exist: dropping 5432 while adding the host port once
+    # took down every in-cluster client (postgres:5432 → connection refused).
+    - name: postgres            # in-cluster contract: postgres:5432
       port: 5432
+      targetPort: postgres
+    - name: postgres-host       # host contract via LB: localhost:5434
+      port: 5434
       targetPort: postgres

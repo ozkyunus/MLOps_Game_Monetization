@@ -24,6 +24,15 @@ async def lifespan(app: FastAPI):
     # DDL at startup, not at import — `import src.main` must not need a DB
     # (tests, tooling, and OpenAPI generation all import the module).
     create_db_and_tables()
+    # Warm the model cache NOW so the first /readyz probe isn't doing cold
+    # joblib loads + MLflow lookups under a 5s probe timeout (that pattern
+    # kept fresh pods NotReady for minutes on the K8s cluster).
+    try:
+        load_models()
+    except Exception as exc:
+        # Don't block startup — /readyz will keep reporting not-ready with
+        # the real reason until models become loadable.
+        print(f"⚠ model warm-up failed at startup: {exc}")
     yield
 
 
@@ -33,6 +42,14 @@ app = FastAPI(
     version="0.1.0",
     lifespan=lifespan,
 )
+
+# /metrics for Prometheus (ops golden signals: rate, latency, errors,
+# in-flight). Custom LLM metrics live in src/metrics.py.
+from prometheus_fastapi_instrumentator import Instrumentator  # noqa: E402
+
+Instrumentator(
+    excluded_handlers=["/metrics", "/healthz", "/readyz"],
+).instrument(app).expose(app)
 
 app.include_router(propensity.router)
 app.include_router(decide.router)

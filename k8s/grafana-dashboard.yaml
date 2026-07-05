@@ -1,0 +1,89 @@
+# Grafana dashboard AS CODE — the kube-prometheus-stack Grafana sidecar
+# watches ConfigMaps labeled `grafana_dashboard: "1"` (any namespace) and
+# auto-loads the embedded JSON. Versioned in git → reviewable, reproducible,
+# ArgoCD-managed in Phase 3. (Clicking panels together in the UI doesn't
+# survive a Grafana wipe; this does.)
+#
+# Three sections: OPS golden signals (instrumentator metrics), LLM/Copilot
+# telemetry (custom metrics in src/metrics.py), and model drift (driftlog
+# table via the provisioned "monetization-postgres" datasource).
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: monetization-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  monetization.json: |
+    {
+      "title": "Monetization — Ops · LLM · Drift",
+      "uid": "monetization-main",
+      "timezone": "browser",
+      "refresh": "30s",
+      "time": {"from": "now-6h", "to": "now"},
+      "panels": [
+        {
+          "id": 1, "type": "timeseries", "title": "API request rate by handler (req/s)",
+          "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
+          "targets": [{
+            "expr": "sum by (handler) (rate(http_requests_total{job=\"api\"}[5m]))",
+            "legendFormat": "{{handler}}"
+          }]
+        },
+        {
+          "id": 2, "type": "timeseries", "title": "API p95 latency (s)",
+          "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
+          "targets": [{
+            "expr": "histogram_quantile(0.95, sum by (le) (rate(http_request_duration_seconds_bucket{job=\"api\"}[5m])))",
+            "legendFormat": "p95"
+          }]
+        },
+        {
+          "id": 3, "type": "stat", "title": "5xx rate (req/s, 15m)",
+          "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
+          "targets": [{
+            "expr": "sum(rate(http_requests_total{job=\"api\", status=~\"5..\"}[15m])) or vector(0)"
+          }],
+          "fieldConfig": {"defaults": {"thresholds": {"steps": [
+            {"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
+        },
+        {
+          "id": 4, "type": "timeseries", "title": "Copilot token consumption (1h window)",
+          "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
+          "targets": [{
+            "expr": "sum by (direction) (increase(copilot_tokens_total[1h]))",
+            "legendFormat": "{{direction}}"
+          }]
+        },
+        {
+          "id": 5, "type": "timeseries", "title": "Copilot p95 latency (s)",
+          "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
+          "targets": [{
+            "expr": "histogram_quantile(0.95, sum by (le) (rate(copilot_latency_seconds_bucket[15m])))",
+            "legendFormat": "end-to-end p95"
+          }, {
+            "expr": "histogram_quantile(0.95, sum by (le) (rate(copilot_retrieval_seconds_bucket[15m])))",
+            "legendFormat": "retrieval-only p95"
+          }]
+        },
+        {
+          "id": 6, "type": "timeseries", "title": "Copilot tool calls (24h)",
+          "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
+          "targets": [{
+            "expr": "sum by (tool) (increase(copilot_tool_calls_total[24h]))",
+            "legendFormat": "{{tool}}"
+          }]
+        },
+        {
+          "id": 7, "type": "table", "title": "Model Drift Log (KS / PSI)",
+          "gridPos": {"h": 9, "w": 24, "x": 0, "y": 16},
+          "datasource": {"type": "postgres", "uid": "monetization-postgres"},
+          "targets": [{
+            "format": "table",
+            "rawSql": "SELECT created_at AS \"time\", feature_name, ks_statistic, drift_detected FROM driftlog ORDER BY created_at DESC LIMIT 50;"
+          }]
+        }
+      ],
+      "schemaVersion": 39
+    }
