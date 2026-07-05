@@ -116,6 +116,16 @@ jobs:
       # amd64-only image fails with "no match for platform in manifest" —
       # K8s safely stalled that rollout (old pods kept serving; the bad
       # image never received traffic).
+
+      # A dual-arch ML image (~2GB of wheels per arch + buildx cache)
+      # exhausts the runner's ~14GB free disk — the first multi-arch run
+      # died mid-build. Drop the preinstalled toolchains we don't use.
+      - name: Free runner disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /opt/hostedtoolcache/CodeQL /usr/local/.ghcup
+          df -h / | tail -1
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
 
@@ -139,7 +149,9 @@ jobs:
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:latest
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:${{ steps.vars.outputs.short_sha }}
           cache-from: type=gha
-          cache-to: type=gha,mode=max
+          # mode=min: only final-stage layers cached — mode=max doubled the
+          # disk/cache footprint and contributed to the out-of-space failure.
+          cache-to: type=gha,mode=min
 
   # ── GitOps leg 2: bump the image tag in k8s/ and commit back ──────────────
   # ArgoCD watches k8s/, sees the new tag, and rolls the Deployment.
