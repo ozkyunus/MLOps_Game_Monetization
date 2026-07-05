@@ -24,6 +24,7 @@ data:
       "time": {"from": "now-6h", "to": "now"},
       "panels": [
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 1, "type": "timeseries", "title": "API request rate by handler (req/s)",
           "gridPos": {"h": 8, "w": 12, "x": 0, "y": 0},
           "targets": [{
@@ -32,6 +33,7 @@ data:
           }]
         },
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 2, "type": "timeseries", "title": "API p95 latency (s)",
           "gridPos": {"h": 8, "w": 6, "x": 12, "y": 0},
           "targets": [{
@@ -40,6 +42,7 @@ data:
           }]
         },
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 3, "type": "stat", "title": "5xx rate (req/s, 15m)",
           "gridPos": {"h": 8, "w": 6, "x": 18, "y": 0},
           "targets": [{
@@ -49,6 +52,7 @@ data:
             {"color": "green", "value": null}, {"color": "red", "value": 0.01}]}}}
         },
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 4, "type": "timeseries", "title": "Copilot token consumption (1h window)",
           "gridPos": {"h": 8, "w": 8, "x": 0, "y": 8},
           "targets": [{
@@ -57,6 +61,7 @@ data:
           }]
         },
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 5, "type": "timeseries", "title": "Copilot p95 latency (s)",
           "gridPos": {"h": 8, "w": 8, "x": 8, "y": 8},
           "targets": [{
@@ -68,6 +73,7 @@ data:
           }]
         },
         {
+          "datasource": {"type": "prometheus", "uid": "prometheus"},
           "id": 6, "type": "timeseries", "title": "Copilot tool calls (24h)",
           "gridPos": {"h": 8, "w": 8, "x": 16, "y": 8},
           "targets": [{
@@ -78,7 +84,7 @@ data:
         {
           "id": 7, "type": "table", "title": "Model Drift Log (KS / PSI)",
           "gridPos": {"h": 9, "w": 24, "x": 0, "y": 16},
-          "datasource": {"type": "postgres", "uid": "monetization-postgres"},
+          "datasource": {"type": "grafana-postgresql-datasource", "uid": "monetization-postgres"},
           "targets": [{
             "format": "table",
             "rawSql": "SELECT created_at AS \"time\", feature_name, ks_statistic, drift_detected FROM driftlog ORDER BY created_at DESC LIMIT 50;"

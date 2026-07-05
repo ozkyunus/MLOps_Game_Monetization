@@ -23,6 +23,7 @@ mobile-game backend, plus a Streamlit dashboard that consumes them:
 | 3 | **Channel ROI** | `GET /channel/roi` | Per-channel CPI, observed ROAS, payback estimate |
 | 4 | **Cohort Retention** | `GET /cohort/retention?dim=...` | D1/D7/D30 proxy retention vs industry benchmarks |
 | 5 | **LLM Offer Copy** | `POST /personalized/offer` | Gemini-generated title / body / CTA (fallback templates when no key) |
+| 6 | **Monetization Copilot** | `POST /copilot/chat` | Agentic RAG analyst assistant: cites a real benchmark corpus (Qdrant) AND calls the platform's own APIs as tools; full telemetry per turn |
 
 ---
 
@@ -196,7 +197,101 @@ revenue) trivially favored IAP for every user — a retention killer.
 
 ---
 
+## ☸️ Kubernetes, GitOps & Observability
+
+The full stack runs on Kubernetes (Docker Desktop, kind provisioning) with a
+complete GitOps + monitoring layer on top:
+
+```
+Docker Desktop Kubernetes
+├─ namespace: monetization
+│   ├─ postgres    Deployment+PVC (Recreate; imperative Secret — never in git)
+│   ├─ qdrant      StatefulSet + volumeClaimTemplate (+native /metrics)
+│   ├─ mlflow      Deployment+PVC (--workers=1 after an OOMKill lesson)
+│   ├─ api         Deployment ×2 · startup/readiness/liveness probes ·
+│   │              /readyz gates traffic on DB+models · resource budgets
+│   ├─ dashboard   Deployment (same image, Streamlit command)
+│   └─ drift-check CronJob (daily KS/PSI → driftlog table)
+├─ namespace: argocd      — watches k8s/ on main: automated + prune + selfHeal
+└─ namespace: monitoring  — kube-prometheus-stack:
+      ServiceMonitors (api, qdrant) · Grafana dashboards AS CODE (ConfigMap)
+      · Postgres datasource provisioned as a Secret for the drift panel
+```
+
+**The GitOps loop**: push to main → CI lints/tests → builds + pushes
+`docker.io/ozkyunus/monetization-api:<short-sha>` → a bot commit bumps the
+image tag in `k8s/*.yaml` → ArgoCD reconciles → rolling update. Humans
+change the cluster by opening PRs; `kubectl apply` is a robot's job.
+
+### Battle scars (every one now encoded in the manifests)
+
+1. **MLflow OOMKilled loop** — 3.x defaults to 4 uvicorn workers; blew the
+   1Gi limit (exit 137). Fix: `--workers=1` + realistic limits.
+2. **kind NodePorts aren't host-reachable** on Docker Desktop → services use
+   `LoadBalancer` (cloud-provider-kind binds them to localhost).
+3. **Dropped in-cluster ports** — adding host ports (5434/5001) while
+   removing 5432/5000 took down every in-cluster client behind
+   mlflow-client's 7-retry backoff. Services now expose BOTH.
+4. **Probes vs slow ML startup** — liveness killed pods mid-model-load
+   (CrashLoopBackOff). Fix: warm-up in lifespan + `startupProbe` (the
+   canonical pattern for slow-starting ML containers). Fresh pods: 0
+   restarts, ready in ~10s.
+5. **UI-built Grafana dashboards die with the pod** (no persistence) —
+   hence dashboards-as-code in a ConfigMap the sidecar auto-loads.
+
+**Honest framing**: this is a single-node cluster; the goal is operational-
+pattern fidelity, not real distribution. On EKS/GKE the deltas would be:
+managed Postgres (or CloudNativePG), a real LoadBalancer/Ingress + TLS,
+external secret management (Vault/ESO), multi-node scheduling and HPA.
+
+## 🤖 Monetization Copilot (RAG + LLMOps)
+
+An analyst-facing chat service (`/copilot/chat`, dashboard page 💬) that
+grounds answers in a **real, attributed knowledge corpus** and the
+platform's **own live data**:
+
+- **Agentic RAG**: Gemini flash-lite with an explicit tool loop (max 4
+  rounds) over 5 tools — `search_knowledge_base` (Qdrant, 21 chunks from
+  curated benchmark/policy/platform docs in `knowledge/`),
+  `get_channel_roi`, `get_retention`, `predict_pltv`, `draft_offer_copy`.
+  The model picks per-question: doc questions retrieve, data questions call
+  tools, mixed questions do both, out-of-scope gets a canonical refusal.
+- **Every turn is telemetry**: answer + citations + tool trace + token
+  counts + latency → `copilot_log` (the LLM analogue of PredictionLog) +
+  custom Prometheus metrics → the Grafana LLM panel.
+- **Versioned prompts**: the system prompt lives at `prompts/copilot_v1.md`;
+  every response and log row carries `prompt_version`.
+- **Evals as the test set** (`evals/`): a 14-case golden set (doc / data /
+  mixed / refusal) measured three ways — retrieval hit rate, deterministic
+  behavior checks, and LLM-as-judge faithfulness. Scores log to MLflow;
+  a CI eval gate (`.github/workflows/evals.yaml`) runs the no-DB subset on
+  PRs touching prompts/agent/corpus + nightly. Baseline: retrieval 1.0,
+  all completed cases passing.
+
+### LLMOps field notes — what the free tier taught us
+
+1. **Managed APIs shift under you**: Google retired `text-embedding-004`
+   mid-build (404 at ingest). Models are dependencies — pin and verify.
+2. **Quota is an architectural constraint**: `gemini-2.5-flash`'s free tier
+   is 20 requests/day — one eval run consumed it. Everything moved to
+   `flash-lite` (separate, larger bucket). Model choice = quota budget.
+3. **Evals must separate "model is wrong" from "API is limited"**: 429/503s
+   are marked ⚠ ERROR, never ✗ FAILED; the runner paces requests and one
+   flaky call can't kill the run.
+4. **Test traffic ≠ production telemetry**: evals call the agent directly —
+   `copilot_log` and the Grafana panels only ever see real usage.
+5. Production deltas: billed tier, request queueing, response caching,
+   model fallback chains.
+
 ## 📸 Screenshots
+
+### Kubernetes era (v2 — current stack)
+
+| | |
+|---|---|
+| ![grafana](docs/screenshots/v2/grafana-dashboard.png) **Grafana — Ops · LLM · Drift** (dashboard-as-code) | ![argocd](docs/screenshots/v2/argocd-monetization-tree.png) **ArgoCD** — the app tree, Synced/Healthy |
+| ![prom](docs/screenshots/v2/prometheus-targets.png) **Prometheus targets** — api ×2 + qdrant UP | ![qdrant](docs/screenshots/v2/qdrant-ui.png) **Qdrant** — the RAG knowledge collection |
+| ![copilot](docs/screenshots/v2/k8s-copilot-page.png) **Copilot chat** (K8s-served) | ![home](docs/screenshots/v2/k8s-dashboard-home.png) **Dashboard Home** (K8s-served) |
 
 ### Streamlit Dashboard
 
@@ -269,7 +364,10 @@ without external tooling.
 | **Data** | PostgreSQL 16 (Docker), real backbone from Kaggle *Marketing Freemium Game* + Firebase *Flood It!*, synthetic augmentation via SDV `GaussianCopulaSynthesizer` |
 | **UI** | Streamlit + Plotly + bilingual toggle (🇹🇷 / 🇬🇧) |
 | **LLM** | LangChain + Google Gemini 2.5 Flash, with 12 offline fallback templates |
-| **Infra** | Docker + Docker Compose (4 services), external named volume |
+| **RAG / LLMOps** | Qdrant (dedicated vector store), Gemini embeddings, versioned prompts, 14-case golden set with retrieval/behavior/LLM-judge evals, CI eval gate, per-turn telemetry (tokens/latency/tools) in `copilot_log` |
+| **Runtime** | **Kubernetes** (Docker Desktop kind): Deployments, StatefulSet, CronJob, probes incl. startupProbe, LoadBalancer services, imperative Secrets. Docker Compose kept as the lightweight alternative |
+| **GitOps / CD** | **ArgoCD** (automated sync + prune + selfHeal) watching `k8s/`; GitHub Actions builds → pushes SHA-tagged images to **Docker Hub** → bumps manifests back into git |
+| **Observability** | **kube-prometheus-stack**: ServiceMonitors (api + qdrant), ops golden signals, custom LLM metrics, dashboards-as-code (ConfigMap), drift CronJob writing `driftlog` surfaced in Grafana via a provisioned Postgres datasource |
 | **Deps** | `uv` (Astral) |
 
 ---
@@ -568,15 +666,18 @@ source inline.
 - ✅ v3 feature set: generator latents (`_engagement_potential`, `engagement_bucket`) removed — models consume only signals a real telemetry SDK could emit
 - ✅ v3.1 generator recalibration: conversion simulated to target (10.0% vs 18% bug), LTV floor/cap artifacts removed, ONE canonical segment rule, seeded reproducible user ids, transactional writes
 - ✅ GitHub Actions CI (ruff + pytest + docker build on PR)
-- ✅ pytest suite (51 tests: benchmarks, synthetic gen, inference, routers)
+- ✅ pytest suite (68 tests: benchmarks, synthetic gen, decision math, inference, routers)
 - ✅ Real Gemini offer copy via LangChain (with offline fallback templates)
+- ✅ **Monetization Copilot**: agentic RAG (Qdrant + 5 tools) + golden-set evals + CI eval gate + prompt versioning + per-turn telemetry
+- ✅ **Kubernetes**: full stack on Docker Desktop kind — Deployments/StatefulSet/CronJob, startup/readiness/liveness probes, LoadBalancer services, imperative Secrets
+- ✅ **GitOps**: ArgoCD automated sync (prune + selfHeal); CI → Docker Hub (SHA tags) → manifest bump → auto-rollout
+- ✅ **Monitoring**: kube-prometheus-stack, ServiceMonitors (api + qdrant), dashboards-as-code (ops + LLM + drift panels)
+- ✅ **Drift detection**: daily CronJob (KS + PSI, input & prediction drift) → `driftlog` → Grafana
 
-**Next** (in scope but not on this branch):
-- 🔜 Drift detection service (populates `driftlog` table)
-- 🔜 Kubernetes manifests (`k8s/` scaffold)
-- 🔜 Prometheus / Grafana monitoring
-- 🔜 Whale tail-model (address the $19 underprediction bias)
+**Next** (documented, not built):
+- 🔜 Whale tail-model (address the whale underprediction bias)
 - 🔜 Retention-aware contextual bandit for context multipliers
+- 🔜 Cloud deployment: EKS/GKE + managed Postgres + Terraform (see the honest single-node framing above)
 
 ---
 

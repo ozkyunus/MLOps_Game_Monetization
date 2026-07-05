@@ -8,6 +8,10 @@ on:
   workflow_dispatch:   # manual runs — required for the docker-build job's
                        # dispatch path to actually be reachable
 
+# The update-manifest job commits the bumped image tag back to the repo.
+permissions:
+  contents: write
+
 # Cancel outdated runs so a rapid succession of pushes doesn't burn CI minutes.
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
