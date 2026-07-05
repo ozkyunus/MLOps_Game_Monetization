@@ -238,6 +238,26 @@ change the cluster by opening PRs; `kubectl apply` is a robot's job.
    restarts, ready in ~10s.
 5. **UI-built Grafana dashboards die with the pod** (no persistence) —
    hence dashboards-as-code in a ConfigMap the sidecar auto-loads.
+6. **selfHeal enforced its rule on us**: a Grafana ConfigMap hotfix applied
+   with `kubectl` (bypassing git) was silently REVERTED by ArgoCD within a
+   minute — the correct fix was committing to git and letting it sync.
+   GitOps means the robot outranks your terminal.
+7. **Multi-arch or it didn't happen**: CI's first Docker Hub image was
+   amd64-only; the Apple Silicon kind node refused it ("no match for
+   platform"). Kubernetes stalled the rollout SAFELY — old pods kept
+   serving (60/60 requests OK during the incident), the bad image never
+   received traffic. Fix: QEMU + `platforms: linux/amd64,linux/arm64`.
+
+### GitOps loop — recorded evidence
+
+```
+$ git push                                  # human commit 4dfea31
+CI: lint ✓ → pytest ✓ → build+push ✓        # docker.io/ozkyunus/monetization-api:4dfea31
+bot: e5b09c5 "chore(gitops): bump image to 4dfea31 [skip ci]"
+ArgoCD: Synced → revision e5b09c5           # cluster reconciled to the BOT's commit
+rolling update: 60/60 curl probes OK        # zero downtime measured during rollout
+$ kubectl get pods -l app=api               # serving image: docker.io/ozkyunus/...:4dfea31
+```
 
 **Honest framing**: this is a single-node cluster; the goal is operational-
 pattern fidelity, not real distribution. On EKS/GKE the deltas would be:

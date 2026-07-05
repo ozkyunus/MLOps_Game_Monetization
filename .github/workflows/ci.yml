@@ -111,6 +111,14 @@ jobs:
         id: vars
         run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
 
+      # Multi-arch is not optional here: the GH runner is amd64 but the
+      # target cluster runs on Apple Silicon (arm64 kind node). An
+      # amd64-only image fails with "no match for platform in manifest" —
+      # K8s safely stalled that rollout (old pods kept serving; the bad
+      # image never received traffic).
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
@@ -120,12 +128,13 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push (latest + immutable SHA tag)
+      - name: Build and push (latest + immutable SHA tag, multi-arch)
         uses: docker/build-push-action@v6
         with:
           context: .
           file: Dockerfile
           push: true
+          platforms: linux/amd64,linux/arm64
           tags: |
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:latest
             docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:${{ steps.vars.outputs.short_sha }}
