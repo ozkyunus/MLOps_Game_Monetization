@@ -247,6 +247,16 @@ change the cluster by opening PRs; `kubectl apply` is a robot's job.
    platform"). Kubernetes stalled the rollout SAFELY — old pods kept
    serving (60/60 requests OK during the incident), the bad image never
    received traffic. Fix: QEMU + `platforms: linux/amd64,linux/arm64`.
+   (Second lesson from the same job: a dual-arch ML image overflows the
+   hosted runner's ~14GB free disk — drop unused toolchains first.)
+8. **Models are not code**: the first CI-built image passed every check,
+   then failed readiness in the cluster — `saved_models/` is gitignored
+   (100MB+), so the registry-built image shipped model-less; the local
+   image had only worked because the dev machine's build context included
+   the artifacts. Fix: `load_models()` pulls the newest registered version
+   from the MLflow registry at startup — the image carries only code, the
+   registry is the model's home. Verified from an empty directory: the
+   version label flipped from the `local-*` fallback to registry `v1`.
 
 ### GitOps loop — recorded evidence
 

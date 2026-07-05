@@ -90,9 +90,16 @@ def _resolve_latest(prefix: str) -> tuple[str, str, str]:
     import glob
     candidates = glob.glob(f"saved_models/{prefix}_v*.joblib")
     if not candidates:
+        # Models are not code: the CI-built image ships WITHOUT joblib
+        # artifacts (100MB+, gitignored). In that case the MLflow registry
+        # is the model's home — pull the newest registered version's
+        # artifact into saved_models/ and continue as usual.
+        candidates = _pull_from_registry(prefix)
+    if not candidates:
         raise FileNotFoundError(
-            f"No saved_models/{prefix}_v*.joblib found. Run "
-            f"`uv run python -m src.ml.train_{prefix}` first."
+            f"No saved_models/{prefix}_v*.joblib found locally or in the "
+            f"MLflow registry. Run `uv run python -m src.ml.train_{prefix}` "
+            f"against the tracking server first."
         )
     # Newest by mtime
     latest = max(candidates, key=os.path.getmtime)
@@ -110,6 +117,33 @@ def _resolve_latest(prefix: str) -> tuple[str, str, str]:
         pass
 
     return latest, f"local-{run_id_short}", run_id_short
+
+
+def _pull_from_registry(prefix: str) -> list[str]:
+    """Download the newest registered {prefix}_model joblib from MLflow.
+
+    The training scripts log the bundle via mlflow.log_artifact(), so the
+    artifact lives at the run root named {prefix}_v{run8}.joblib and is
+    served through the tracking server's artifact proxy.
+    """
+    try:
+        client = mlflow.MlflowClient()
+        versions = client.search_model_versions(f"name='{prefix}_model'")
+        if not versions:
+            return []
+        newest = max(versions, key=lambda m: int(m.version))
+        os.makedirs("saved_models", exist_ok=True)
+        for art in client.list_artifacts(newest.run_id):
+            if art.path.startswith(f"{prefix}_v") and art.path.endswith(".joblib"):
+                local = mlflow.artifacts.download_artifacts(
+                    run_id=newest.run_id, artifact_path=art.path,
+                    dst_path="saved_models")
+                print(f"✓ pulled {art.path} from MLflow registry "
+                      f"(model v{newest.version})")
+                return [local]
+    except Exception as exc:
+        print(f"⚠ MLflow registry pull failed for {prefix}: {exc}")
+    return []
 
 
 def fetch_user_features(user_id: str) -> pd.DataFrame:
