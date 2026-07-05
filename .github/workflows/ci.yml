@@ -67,13 +67,12 @@ jobs:
         run: uv run pytest -q
 
   # ── Docker build (verifies the Dockerfile still produces a healthy image) ─
-  # Skipped on plain pushes to avoid burning ~10min every commit — runs on
-  # PRs and on manual workflow_dispatch.
+  # PR-only sanity build (no push).
   docker-build:
-    name: Docker build
+    name: Docker build (PR check)
     runs-on: ubuntu-latest
     needs: lint
-    if: github.event_name == 'pull_request' || github.event_name == 'workflow_dispatch'
+    if: github.event_name == 'pull_request'
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -91,3 +90,76 @@ jobs:
           # GHA layer cache so subsequent builds are fast.
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+  # ── GitOps leg 1: build & push to Docker Hub (main only) ──────────────────
+  build-and-push:
+    name: Build & push (Docker Hub)
+    runs-on: ubuntu-latest
+    needs: tests
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    outputs:
+      short_sha: ${{ steps.vars.outputs.short_sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute short SHA
+        id: vars
+        run: echo "short_sha=$(echo ${{ github.sha }} | cut -c1-7)" >> "$GITHUB_OUTPUT"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push (latest + immutable SHA tag)
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: |
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:latest
+            docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api:${{ steps.vars.outputs.short_sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ── GitOps leg 2: bump the image tag in k8s/ and commit back ──────────────
+  # ArgoCD watches k8s/, sees the new tag, and rolls the Deployment.
+  # `[skip ci]` prevents the bot commit from re-triggering this workflow.
+  update-manifest:
+    name: Bump k8s image tag
+    runs-on: ubuntu-latest
+    needs: build-and-push
+    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump image tags
+        run: |
+          SHA="${{ needs.build-and-push.outputs.short_sha }}"
+          IMAGE="docker.io/${{ secrets.DOCKERHUB_USERNAME }}/monetization-api"
+          # Anchor on the image name so nothing else is touched; matches both
+          # the initial local ref (monetization-api:latest) and later SHA refs.
+          sed -i -E "s#image: .*monetization-api.*#image: ${IMAGE}:${SHA}#" \
+            k8s/api.yaml k8s/dashboard.yaml k8s/drift-cronjob.yaml
+          git diff --stat
+
+      - name: Commit and push
+        run: |
+          if git diff --quiet; then
+            echo "No tag change — already at this SHA."; exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add k8s/
+          git commit -m "chore(gitops): bump image to ${{ needs.build-and-push.outputs.short_sha }} [skip ci]"
+          git push

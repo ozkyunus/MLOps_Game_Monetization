@@ -1,0 +1,38 @@
+# ArgoCD Application — GitOps contract for the platform.
+#
+# ArgoCD watches the k8s/ folder of this repo on main and continuously
+# reconciles the cluster to match it. From this point on, `kubectl apply`
+# is a robot's job: humans change the cluster by opening PRs.
+#
+# Apply once (ArgoCD manages itself from then on):
+#   kubectl apply -n argocd -f argocd/application.yaml
+#
+# The repo is private — ArgoCD authenticates via a Secret labeled
+# `argocd.argoproj.io/secret-type: repository` (created imperatively with a
+# GitHub token; never committed).
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: monetization
+  namespace: argocd
+spec:
+  project: default
+
+  source:
+    repoURL: https://github.com/ozkyunus/MLOps_Capstone.git
+    targetRevision: main
+    path: k8s
+
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: monetization
+
+  syncPolicy:
+    automated:
+      prune: true       # resources removed from k8s/ are removed from the cluster
+      selfHeal: true    # manual cluster edits are reverted to match git
+    syncOptions:
+      - CreateNamespace=true
+      # Manifests carry explicit namespaces (monetization + the Grafana
+      # dashboard ConfigMap in monitoring); honor them.
+      - RespectIgnoreDifferences=true

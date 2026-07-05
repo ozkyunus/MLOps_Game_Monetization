@@ -107,11 +107,18 @@ def main() -> None:
     parser.add_argument("--judge", action="store_true")
     parser.add_argument("--mlflow", action="store_true")
     parser.add_argument("--only", help="run a single case id")
+    parser.add_argument("--subset", choices=["ci"],
+                        help="'ci' = only cases needing no platform DB "
+                             "(doc-RAG + refusal) — runnable on a bare "
+                             "runner with just Qdrant + GOOGLE_API_KEY")
     args = parser.parse_args()
 
     cases = yaml.safe_load(GOLDEN_PATH.read_text())
     if args.only:
         cases = [c for c in cases if c["id"] == args.only]
+    if args.subset == "ci":
+        cases = [c for c in cases
+                 if set(c.get("expected_tools") or []) <= {"search_knowledge_base"}]
     print(f"Golden set: {len(cases)} cases\n")
 
     results, t0 = [], time.time()

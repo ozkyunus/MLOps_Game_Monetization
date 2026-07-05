@@ -1,0 +1,61 @@
+name: LLM Evals
+
+# The eval GATE for copilot quality. Runs:
+#   - on PRs touching the prompt / agent / corpus / eval definitions
+#   - nightly (03:30 UTC) as the drift-watch for LLM behavior
+#   - manually via workflow_dispatch
+#
+# CI subset = doc-RAG + refusal cases only (no platform DB on the runner);
+# the full set incl. data-tool cases + LLM-judge faithfulness runs locally:
+#   uv run python -m evals.run --judge --mlflow
+on:
+  pull_request:
+    paths:
+      - 'prompts/**'
+      - 'evals/**'
+      - 'src/copilot/**'
+      - 'knowledge/**'
+  schedule:
+    - cron: '30 3 * * *'
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  eval-gate:
+    name: Golden-set gate (CI subset)
+    runs-on: ubuntu-latest
+    services:
+      qdrant:
+        image: qdrant/qdrant:latest
+        ports:
+          - 6333:6333
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "0.5.11"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Sync dependencies (locked)
+        run: uv sync --frozen --group dev
+
+      - name: Ingest knowledge corpus into Qdrant
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          QDRANT_URL: http://localhost:6333
+        run: uv run python -m scripts.ingest_knowledge
+
+      - name: Run eval gate (exit 1 below thresholds)
+        env:
+          GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+          QDRANT_URL: http://localhost:6333
+        run: uv run python -m evals.run --subset ci

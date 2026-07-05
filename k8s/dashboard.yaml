@@ -16,6 +16,8 @@ spec:
       labels:
         app: dashboard
     spec:
+      imagePullSecrets:
+        - name: dockerhub-pull
       containers:
         - name: dashboard
           image: monetization-api:latest

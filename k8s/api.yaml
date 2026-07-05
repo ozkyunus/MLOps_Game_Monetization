@@ -26,6 +26,8 @@ spec:
       labels:
         app: api
     spec:
+      imagePullSecrets:
+        - name: dockerhub-pull
       containers:
         - name: api
           # Phase 3 CI bumps this tag to immutable short-SHAs pushed to
