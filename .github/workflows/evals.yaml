@@ -16,7 +16,10 @@ on:
       - 'src/copilot/**'
       - 'knowledge/**'
   schedule:
-    - cron: '30 3 * * *'
+    # 08:00 UTC — ONE HOUR AFTER the Gemini free-tier daily quota resets
+    # (midnight PT = 07:00 UTC). The original 03:30 UTC slot ran on the
+    # dregs of the previous day's quota and flapped with 429s.
+    - cron: '0 8 * * *'
   workflow_dispatch:
 
 concurrency:

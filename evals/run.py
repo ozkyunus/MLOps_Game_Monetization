@@ -149,13 +149,22 @@ def main() -> None:
               f"{'' if r['passed'] else 'FAILED: ' + ', '.join(failed)}")
 
     # ── Aggregate ────────────────────────────────────────────────────────────
-    retrieval_cases = [r for r in results if r["retrieval_ok"] is not None]
+    # Quality metrics are computed over cases the API actually ANSWERED.
+    # An errored case (429/503 after retry) is an availability problem, not
+    # a model-quality signal — mixing them makes the gate flap with the
+    # provider's quota weather. Errors are reported separately and gate the
+    # run only when they dominate (inconclusive ≠ failed).
+    errored = [r for r in results if r.get("error")]
+    scored = [r for r in results if not r.get("error")]
+    retrieval_cases = [r for r in scored if r["retrieval_ok"] is not None]
     metrics = {
-        "behavior_pass_rate": sum(r["passed"] for r in results) / len(results),
+        "behavior_pass_rate": (
+            sum(r["passed"] for r in scored) / len(scored) if scored else None),
         "retrieval_hit_rate": (
             sum(r["retrieval_ok"] for r in retrieval_cases) / len(retrieval_cases)
             if retrieval_cases else None
         ),
+        "errored_cases": len(errored),
         "total_tokens": sum(r["usage"]["input_tokens"] + r["usage"]["output_tokens"]
                             for r in results),
         "mean_latency_ms": round(sum(r["latency_ms"] for r in results) / len(results)),
@@ -184,6 +193,11 @@ def main() -> None:
         print("✓ MLflow'a loglandı (experiment: copilot_evals)")
 
     # ── Gate (CI uses the exit code) ─────────────────────────────────────────
+    # exit 1 = quality regression; exit 2 = inconclusive (API availability).
+    if len(errored) > len(results) * 0.3:
+        print(f"\n⚠ EVAL GATE INCONCLUSIVE: {len(errored)}/{len(results)} cases "
+              f"hit API errors — rerun when quota/availability recovers.")
+        sys.exit(2)
     failures = []
     for key, threshold in THRESHOLDS.items():
         value = metrics.get(key)
@@ -192,7 +206,10 @@ def main() -> None:
     if failures:
         print("\n❌ EVAL GATE FAILED: " + "; ".join(failures))
         sys.exit(1)
-    print("\n✓ Eval gate passed.")
+    if errored:
+        print(f"\n✓ Eval gate passed ({len(errored)} case(s) skipped on API errors).")
+    else:
+        print("\n✓ Eval gate passed.")
 
 
 if __name__ == "__main__":

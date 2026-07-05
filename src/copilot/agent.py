@@ -24,7 +24,7 @@ from src.copilot import vectorstore
 
 load_dotenv()
 
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "copilot_v1.md"
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "copilot_v2.md"
 PROMPT_VERSION = PROMPT_PATH.stem.split("_")[-1]          # "v1"
 MODEL_NAME = "gemini-2.5-flash-lite"
 MAX_TOOL_ROUNDS = 4
