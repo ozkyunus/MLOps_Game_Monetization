@@ -1,0 +1,83 @@
+# FastAPI serving — 2 replicas behind a Service.
+#
+# Secrets (create before first apply):
+#   kubectl -n monetization create secret generic app-secret \
+#     --from-literal=SQLALCHEMY_DATABASE_URL='postgresql+psycopg2://train:<pw>@postgres:5432/monetization_db' \
+#     --from-literal=GOOGLE_API_KEY='<key>'        # optional — LLM features
+#
+# Probes: /healthz = liveness (process up, dependency-free by design),
+# /readyz = readiness (DB reachable + model bundles load) — a pod gets NO
+# traffic until models are actually servable. This is where the readyz
+# endpoint earns its keep.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: api
+  namespace: monetization
+  labels:
+    app: api
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: api
+  template:
+    metadata:
+      labels:
+        app: api
+    spec:
+      containers:
+        - name: api
+          # Phase 3 CI bumps this tag to immutable short-SHAs pushed to
+          # Docker Hub; until then the locally built image is used.
+          image: monetization-api:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SQLALCHEMY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: SQLALCHEMY_DATABASE_URL
+            - name: GOOGLE_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: GOOGLE_API_KEY
+                  optional: true          # boots without it; /copilot + LLM copy 503
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5000
+            - name: QDRANT_URL
+              value: http://qdrant:6333
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            httpGet: {path: /healthz, port: http}
+            initialDelaySeconds: 20
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 250m, memory: 768Mi}
+            limits:   {cpu: "1",  memory: 2Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: api
+  namespace: monetization
+  labels:
+    app: api
+spec:
+  # LoadBalancer: Docker Desktop's cloud-provider-kind binds this to
+  # localhost:<port> on the host (kind NodePorts are NOT host-reachable).
+  type: LoadBalancer
+  selector:
+    app: api
+  ports:
+    - name: http
+      port: 8000
+      targetPort: http

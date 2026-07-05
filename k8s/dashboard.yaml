@@ -1,0 +1,72 @@
+# Streamlit dashboard — same image as the API, different command.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dashboard
+  namespace: monetization
+  labels:
+    app: dashboard
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dashboard
+  template:
+    metadata:
+      labels:
+        app: dashboard
+    spec:
+      containers:
+        - name: dashboard
+          image: monetization-api:latest
+          imagePullPolicy: IfNotPresent
+          command: ["streamlit", "run", "dashboard/Home.py",
+                    "--server.port=8501", "--server.address=0.0.0.0",
+                    "--server.headless=true",
+                    "--browser.gatherUsageStats=false"]
+          ports:
+            - name: http
+              containerPort: 8501
+          env:
+            - name: API_URL
+              value: http://api:8000
+            - name: SQLALCHEMY_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: app-secret
+                  key: SQLALCHEMY_DATABASE_URL
+            - name: MLFLOW_TRACKING_URI
+              value: http://mlflow:5000
+            # Browser-facing links — the user's browser can't resolve
+            # cluster DNS names, so these point at the NodePorts.
+            - name: PUBLIC_API_URL
+              value: http://localhost:8000
+            - name: PUBLIC_MLFLOW_URL
+              value: http://localhost:5001
+          readinessProbe:
+            httpGet: {path: /_stcore/health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: {path: /_stcore/health, port: http}
+            initialDelaySeconds: 30
+            periodSeconds: 30
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits:   {cpu: 500m, memory: 1Gi}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dashboard
+  namespace: monetization
+  labels:
+    app: dashboard
+spec:
+  type: LoadBalancer          # host: localhost:8501
+  selector:
+    app: dashboard
+  ports:
+    - name: http
+      port: 8501
+      targetPort: http

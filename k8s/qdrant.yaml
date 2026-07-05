@@ -1,0 +1,72 @@
+# Qdrant — vector store for the Copilot's RAG knowledge base.
+#
+# StatefulSet, not Deployment: a vector DB is stateful (its index lives on
+# disk). volumeClaimTemplates give each replica its own PVC with a stable
+# identity — the textbook reason StatefulSets exist. Single replica here;
+# Qdrant clustering would be the scale-out path.
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: qdrant
+  namespace: monetization
+  labels:
+    app: qdrant
+spec:
+  serviceName: qdrant
+  replicas: 1
+  selector:
+    matchLabels:
+      app: qdrant
+  template:
+    metadata:
+      labels:
+        app: qdrant
+    spec:
+      containers:
+        - name: qdrant
+          image: qdrant/qdrant:latest
+          ports:
+            - name: http
+              containerPort: 6333
+          # Qdrant exposes /readyz and /livez natively (and Prometheus
+          # metrics at /metrics — the monitoring step scrapes that).
+          readinessProbe:
+            httpGet: {path: /readyz, port: http}
+            initialDelaySeconds: 5
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /livez, port: http}
+            initialDelaySeconds: 15
+            periodSeconds: 15
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits:   {cpu: 500m, memory: 1Gi}
+          volumeMounts:
+            - name: storage
+              mountPath: /qdrant/storage
+  volumeClaimTemplates:
+    - metadata:
+        name: storage
+      spec:
+        accessModes: ["ReadWriteOnce"]
+        resources:
+          requests:
+            storage: 1Gi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: qdrant
+  namespace: monetization
+  labels:
+    app: qdrant
+spec:
+  # LoadBalancer → host localhost:6333 (web UI at /dashboard);
+  # in-cluster clients use qdrant:6333.
+  type: LoadBalancer
+  selector:
+    app: qdrant
+  ports:
+    - name: http
+      port: 6333
+      targetPort: http

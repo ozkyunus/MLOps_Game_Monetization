@@ -117,7 +117,7 @@ def main() -> None:
     results, t0 = [], time.time()
     for i, case in enumerate(cases):
         if i:
-            time.sleep(4)   # stay under the free-tier requests-per-minute cap
+            time.sleep(10)  # free-tier RPM is ~15 and each case makes 2+ calls — pace hard
         try:
             r = eval_case(case)
         except Exception as exc:
@@ -127,8 +127,8 @@ def main() -> None:
                  "retrieval_ok": None, "answer": f"ERROR: {exc}", "cited": [],
                  "tools": [], "usage": {"input_tokens": 0, "output_tokens": 0},
                  "latency_ms": 0.0, "error": f"{type(exc).__name__}"}
-            print(f"  ⚠ {case['id']:<28} ERROR: {type(exc).__name__} — retrying once in 20s")
-            time.sleep(20)
+            print(f"  ⚠ {case['id']:<28} ERROR: {type(exc).__name__} — retrying once in 45s")
+            time.sleep(45)
             try:
                 r = eval_case(case)
             except Exception:

@@ -1,0 +1,83 @@
+# MLflow — tracking + model registry (SQLite backend on a PVC).
+# Fresh PVC = fresh registry; the API tolerates an empty registry (falls
+# back to local-* version strings), so this is non-blocking.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: mlflow-pvc
+  namespace: monetization
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mlflow
+  namespace: monetization
+  labels:
+    app: mlflow
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate            # SQLite backend — single writer only
+  selector:
+    matchLabels:
+      app: mlflow
+  template:
+    metadata:
+      labels:
+        app: mlflow
+    spec:
+      containers:
+        - name: mlflow
+          image: ghcr.io/mlflow/mlflow:v3.14.0
+          args:
+            - mlflow
+            - server
+            - --host=0.0.0.0
+            - --port=5000
+            - --backend-store-uri=sqlite:////data/mlflow.db
+            - --artifacts-destination=/data/artifacts
+            - --serve-artifacts
+            # MLflow 3.x defaults to 4 uvicorn workers; 4 Python processes
+            # blew straight through the 1Gi memory limit → OOMKilled loop
+            # (exit 137). One worker is plenty for a demo cluster.
+            - --workers=1
+          env:
+            # MLflow 3.x Host-header security: trust in-cluster + host names.
+            - name: MLFLOW_SERVER_ALLOWED_HOSTS
+              value: "mlflow,mlflow:*,localhost,localhost:*,127.0.0.1,127.0.0.1:*"
+          ports:
+            - name: http
+              containerPort: 5000
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 100m, memory: 512Mi}
+            limits:   {cpu: 500m, memory: 1536Mi}
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: mlflow-pvc
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mlflow
+  namespace: monetization
+spec:
+  type: LoadBalancer          # host: localhost:5001
+  selector:
+    app: mlflow
+  ports:
+    - name: http
+      port: 5001
+      targetPort: http
