@@ -32,7 +32,7 @@ spec:
         - name: api
           # Phase 3 CI bumps this tag to immutable short-SHAs pushed to
           # Docker Hub; until then the locally built image is used.
-          image: docker.io/ozkyunus/monetization-api:d9d331c
+          image: docker.io/ozkyunus/monetization-api:63d3cdf
           imagePullPolicy: IfNotPresent
           ports:
             - name: http
