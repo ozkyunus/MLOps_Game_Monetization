@@ -19,7 +19,7 @@ spec:
   project: default
 
   source:
-    repoURL: https://github.com/ozkyunus/MLOps_Capstone.git
+    repoURL: https://github.com/ozkyunus/MLOps_Game_Monetization.git
     targetRevision: main
     path: k8s
 

@@ -1,7 +1,7 @@
 # 🎮 Player Monetization Intelligence Platform
 
-[![CI](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/ci.yml/badge.svg)](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/ci.yml)
-[![LLM Evals](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/evals.yaml/badge.svg)](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/evals.yaml)
+[![CI](https://github.com/ozkyunus/MLOps_Game_Monetization/actions/workflows/ci.yml/badge.svg)](https://github.com/ozkyunus/MLOps_Game_Monetization/actions/workflows/ci.yml)
+[![LLM Evals](https://github.com/ozkyunus/MLOps_Game_Monetization/actions/workflows/evals.yaml/badge.svg)](https://github.com/ozkyunus/MLOps_Game_Monetization/actions/workflows/evals.yaml)
 ![Python](https://img.shields.io/badge/python-3.12-blue)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
@@ -95,7 +95,7 @@ clone needs a one-time setup before the stack is fully alive:
   step below; predict endpoints return errors until they exist.
 
 ```bash
-git clone <this-repo> && cd MLOps_Capstone
+git clone <this-repo> && cd MLOps_Game_Monetization
 cp .env.example .env          # REQUIRED: set POSTGRES_PASSWORD (compose
                               # refuses to start without it), keep the same
                               # password inside SQLALCHEMY_DATABASE_URL
@@ -466,7 +466,7 @@ without external tooling.
 ## 📁 Project Structure
 
 ```
-MLOps_Capstone/
+MLOps_Game_Monetization/
 ├── src/
 │   ├── main.py                     FastAPI entry, wires 5 routers
 │   ├── database.py                 Postgres engine
