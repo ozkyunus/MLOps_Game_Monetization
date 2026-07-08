@@ -20,7 +20,7 @@ spec:
         - name: dockerhub-pull
       containers:
         - name: dashboard
-          image: docker.io/ozkyunus/monetization-api:63d3cdf
+          image: docker.io/ozkyunus/monetization-api:7d16be6
           imagePullPolicy: IfNotPresent
           command: ["streamlit", "run", "dashboard/Home.py",
                     "--server.port=8501", "--server.address=0.0.0.0",

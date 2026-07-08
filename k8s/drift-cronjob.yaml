@@ -24,7 +24,7 @@ spec:
             - name: dockerhub-pull
           containers:
             - name: drift-check
-              image: docker.io/ozkyunus/monetization-api:63d3cdf
+              image: docker.io/ozkyunus/monetization-api:7d16be6
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "src.drift.check", "--days", "7"]
               env:

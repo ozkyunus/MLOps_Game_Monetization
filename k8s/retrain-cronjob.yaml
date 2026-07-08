@@ -25,7 +25,7 @@ spec:
             - name: dockerhub-pull
           containers:
             - name: retrain
-              image: docker.io/ozkyunus/monetization-api:63d3cdf
+              image: docker.io/ozkyunus/monetization-api:7d16be6
               imagePullPolicy: IfNotPresent
               command: ["python", "-m", "src.retrain.run"]
               env:
