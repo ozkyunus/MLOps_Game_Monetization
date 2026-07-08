@@ -391,6 +391,12 @@ def main():
             print(f"⚠ MLflow log_model failed ({e}). Local joblib still saved + "
                   f"inference loads from local cache.")
 
+        # ── Promotion gate — serving loads the `champion` alias; a candidate
+        # must beat the incumbent on held-out AUC to take it.
+        from src.ml.promotion import promote_if_better
+        promote_if_better(MODEL_NAME, run_id, "test_auc",
+                          higher_is_better=True, tolerance=0.005)
+
         print(f"\n✓ Model saved: {local_path}")
         print(f"✓ MLflow UI: {os.getenv('MLFLOW_TRACKING_URI')}/#/experiments")
 

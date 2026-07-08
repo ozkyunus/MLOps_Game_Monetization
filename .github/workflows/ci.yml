@@ -177,7 +177,7 @@ jobs:
           # Anchor on the image name so nothing else is touched; matches both
           # the initial local ref (monetization-api:latest) and later SHA refs.
           sed -i -E "s#image: .*monetization-api.*#image: ${IMAGE}:${SHA}#" \
-            k8s/api.yaml k8s/dashboard.yaml k8s/drift-cronjob.yaml
+            k8s/api.yaml k8s/dashboard.yaml k8s/drift-cronjob.yaml k8s/retrain-cronjob.yaml
           git diff --stat
 
       - name: Commit and push

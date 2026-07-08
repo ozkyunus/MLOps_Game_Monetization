@@ -300,6 +300,12 @@ def main():
         except Exception as e:
             print(f"⚠ MLflow log_model failed ({e}). Local joblib still saved.")
 
+        # ── Promotion gate — candidate must match/beat the champion's
+        # held-out MAE (lower is better; $0.50 noise tolerance).
+        from src.ml.promotion import promote_if_better
+        promote_if_better(MODEL_NAME, run_id, "test_mae",
+                          higher_is_better=False, tolerance=0.5)
+
         print(f"\n✓ Primary model saved: {local_path}")
         print(f"✓ Registered as: {MODEL_NAME}")
 

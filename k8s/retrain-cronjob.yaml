@@ -1,0 +1,41 @@
+# Continuous Training CronJob — acts on what the drift detector finds.
+#
+# Weekly (Sunday 07:00 UTC, after Saturday's drift check): if the latest
+# driftlog batch flags drift, retrain both models against the in-cluster
+# MLflow. The promotion gate inside the training scripts decides whether
+# the new model takes the `champion` alias — serving only ever loads the
+# champion, so a degraded retrain cannot reach production.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: retrain
+  namespace: monetization
+spec:
+  schedule: "0 7 * * 0"
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 2
+  failedJobsHistoryLimit: 2
+  jobTemplate:
+    spec:
+      backoffLimit: 0            # a failed training run is investigated, not retried blindly
+      template:
+        spec:
+          restartPolicy: Never
+          imagePullSecrets:
+            - name: dockerhub-pull
+          containers:
+            - name: retrain
+              image: docker.io/ozkyunus/monetization-api:63d3cdf
+              imagePullPolicy: IfNotPresent
+              command: ["python", "-m", "src.retrain.run"]
+              env:
+                - name: SQLALCHEMY_DATABASE_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: app-secret
+                      key: SQLALCHEMY_DATABASE_URL
+                - name: MLFLOW_TRACKING_URI
+                  value: http://mlflow:5000
+              resources:
+                requests: {cpu: 500m, memory: 1Gi}
+                limits:   {cpu: "2",  memory: 3Gi}

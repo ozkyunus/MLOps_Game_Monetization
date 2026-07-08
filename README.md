@@ -1,8 +1,43 @@
 # 🎮 Player Monetization Intelligence Platform
 
-A production-style **MLOps capstone** for mobile-game monetization: five FastAPI
-services backed by calibrated two-tower pLTV models, MLflow registry, PostgreSQL
-event logs, a Streamlit dashboard, and a one-command Docker Compose stack.
+[![CI](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/ci.yml/badge.svg)](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/ci.yml)
+[![LLM Evals](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/evals.yaml/badge.svg)](https://github.com/ozkyunus/MLOps_Capstone/actions/workflows/evals.yaml)
+![Python](https://img.shields.io/badge/python-3.12-blue)
+![License](https://img.shields.io/badge/license-MIT-green)
+
+An end-to-end **MLOps platform** for mobile-game monetization: calibrated
+two-tower pLTV models governed by a champion/challenger registry, a decision
+engine, an agentic RAG copilot with eval gates — running on Kubernetes with
+ArgoCD GitOps, drift-triggered continuous training, and full observability.
+
+```mermaid
+flowchart LR
+    subgraph CODE["🔁 Code loop (GitOps)"]
+        direction LR
+        DEV[git push] --> CI[GitHub Actions<br/>lint · 68 tests · multi-arch build]
+        CI -->|image :sha| HUB[(Docker Hub)]
+        CI -->|bot commit<br/>bumps k8s/| GIT[(git = desired state)]
+        GIT --> ARGO[ArgoCD<br/>sync · prune · selfHeal]
+        ARGO --> K8S
+    end
+    subgraph K8S["☸️ Kubernetes"]
+        direction TB
+        API[api ×2<br/>FastAPI] --- DASH[dashboard]
+        PG[(PostgreSQL)] --- QD[(Qdrant)]
+        DRIFT[drift CronJob<br/>KS + PSI] --> PG
+        RETRAIN[retrain CronJob] --> MLF
+    end
+    subgraph MODEL["🧠 Model loop (CT + governance)"]
+        direction LR
+        MLF[(MLflow registry)] -->|champion alias only| API
+        DRIFT -->|drift detected| RETRAIN
+        RETRAIN -->|promotion gate:<br/>beat champion or stay shelved| MLF
+    end
+    HUB -->|pull :sha| K8S
+    PROM[Prometheus] -.scrape.-> API
+    GRAF[Grafana<br/>ops · LLM · drift] -.-> PROM
+    GRAF -.-> PG
+```
 
 > **📖 Read this first**: The pipeline is production-shaped, but the ML signal
 > is constrained by the public datasets used. See **[Limitations & Lessons
@@ -267,6 +302,32 @@ bot: e5b09c5 "chore(gitops): bump image to 4dfea31 [skip ci]"
 ArgoCD: Synced → revision e5b09c5           # cluster reconciled to the BOT's commit
 rolling update: 60/60 curl probes OK        # zero downtime measured during rollout
 $ kubectl get pods -l app=api               # serving image: docker.io/ozkyunus/...:4dfea31
+```
+
+### Continuous Training + model governance (the loop that closes the loop)
+
+Drift detection that nobody acts on is a dashboard, not MLOps. Two pieces
+close the loop:
+
+1. **Champion/challenger governance** (`src/ml/promotion.py`): serving never
+   loads "the newest" model — it loads the MLflow version carrying the
+   **`champion` alias**. A freshly trained candidate earns that alias only by
+   beating the incumbent on the held-out metric (AUC for propensity, MAE for
+   LTV, with noise tolerance). A degraded retrain stays in the registry as a
+   recorded experiment and **cannot reach production**.
+2. **Drift-triggered retraining** (`src/retrain/run.py`, weekly CronJob):
+   reads the latest `driftlog` batch → clean means exit, drift means retrain
+   both models against the in-cluster MLflow → the promotion gate decides →
+   on success the API's `/admin/reload-models` hot-swaps the champions with
+   zero pod restarts.
+
+Recorded live run:
+
+```
+🔁 Retraining triggered (drift in: p_payer_served (PSI), country (PSI))
+👑 propensity_model v3 PROMOTED — test_auc: 0.6374 vs champion 0.6374 (tol 0.005)
+👑 ltv_model v2 PROMOTED — test_mae: 7.8611 vs champion 7.8611 (tol 0.5)
+✓ Continuous-training cycle complete.
 ```
 
 **Honest framing**: this is a single-node cluster; the goal is operational-
@@ -703,10 +764,14 @@ source inline.
 - ✅ **GitOps**: ArgoCD automated sync (prune + selfHeal); CI → Docker Hub (SHA tags) → manifest bump → auto-rollout
 - ✅ **Monitoring**: kube-prometheus-stack, ServiceMonitors (api + qdrant), dashboards-as-code (ops + LLM + drift panels)
 - ✅ **Drift detection**: daily CronJob (KS + PSI, input & prediction drift) → `driftlog` → Grafana
+- ✅ **Model governance**: champion/challenger via MLflow aliases — serving loads the `champion` only; promotion gate compares held-out metrics before any model reaches production
+- ✅ **Continuous Training**: weekly retrain CronJob triggered by the drift verdict; hot model swap via `/admin/reload-models` (zero restarts)
 
 **Next** (documented, not built):
 - 🔜 Whale tail-model (address the whale underprediction bias)
 - 🔜 Retention-aware contextual bandit for context multipliers
+- 🔜 Shadow/A-B model deployment (challenger scores logged, not served)
+- 🔜 Alertmanager rules on drift PSI + 5xx thresholds
 - 🔜 Cloud deployment: EKS/GKE + managed Postgres + Terraform (see the honest single-node framing above)
 
 ---

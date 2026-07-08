@@ -120,26 +120,33 @@ def _resolve_latest(prefix: str) -> tuple[str, str, str]:
 
 
 def _pull_from_registry(prefix: str) -> list[str]:
-    """Download the newest registered {prefix}_model joblib from MLflow.
+    """Download the {prefix}_model joblib from the MLflow registry.
 
-    The training scripts log the bundle via mlflow.log_artifact(), so the
-    artifact lives at the run root named {prefix}_v{run8}.joblib and is
-    served through the tracking server's artifact proxy.
+    Governance: serving prefers the version carrying the **champion** alias
+    (set by the promotion gate in src/ml/promotion.py) — NOT "the newest".
+    A freshly registered but worse model therefore never reaches serving.
+    Falls back to the newest version only when no champion exists yet.
     """
     try:
         client = mlflow.MlflowClient()
-        versions = client.search_model_versions(f"name='{prefix}_model'")
-        if not versions:
+        chosen, label = None, ""
+        try:
+            chosen = client.get_model_version_by_alias(f"{prefix}_model", "champion")
+            label = f"champion v{chosen.version}"
+        except Exception:
+            versions = client.search_model_versions(f"name='{prefix}_model'")
+            if versions:
+                chosen = max(versions, key=lambda m: int(m.version))
+                label = f"newest v{chosen.version} (no champion alias yet)"
+        if chosen is None:
             return []
-        newest = max(versions, key=lambda m: int(m.version))
         os.makedirs("saved_models", exist_ok=True)
-        for art in client.list_artifacts(newest.run_id):
+        for art in client.list_artifacts(chosen.run_id):
             if art.path.startswith(f"{prefix}_v") and art.path.endswith(".joblib"):
                 local = mlflow.artifacts.download_artifacts(
-                    run_id=newest.run_id, artifact_path=art.path,
+                    run_id=chosen.run_id, artifact_path=art.path,
                     dst_path="saved_models")
-                print(f"✓ pulled {art.path} from MLflow registry "
-                      f"(model v{newest.version})")
+                print(f"✓ pulled {art.path} from MLflow registry ({label})")
                 return [local]
     except Exception as exc:
         print(f"⚠ MLflow registry pull failed for {prefix}: {exc}")
