@@ -1,6 +1,6 @@
 """Monetization Copilot — agentic RAG core.
 
-Design (see docs/superpowers/specs/2026-07-03-copilot-rag-llmops-design.md):
+Design (see docs/specs/2026-07-03-copilot-rag-llmops-design.md):
   - Gemini with bound tools; an EXPLICIT tool loop (max MAX_TOOL_ROUNDS)
     instead of an opaque agent framework — full control over telemetry,
     tracing and guardrails, and nothing to fight when versions move.
